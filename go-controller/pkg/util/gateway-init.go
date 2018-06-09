@@ -106,6 +106,7 @@ func generateGatewayIP() (string, error) {
 func GatewayInit(clusterIPSubnet, nodeName, nicIP, physicalInterface,
 	bridgeInterface, defaultGW, rampoutIPSubnet string,
 	gatewayLBEnable bool) error {
+	logrus.Errorf("Test")
 
 	ip, physicalIPNet, err := net.ParseCIDR(nicIP)
 	if err != nil {
@@ -130,6 +131,8 @@ func GatewayInit(clusterIPSubnet, nodeName, nicIP, physicalInterface,
 	if err != nil {
 		return err
 	}
+
+	logrus.Errorf("Starting")
 
 	// Create a gateway router.
 	gatewayRouter := "GR_" + nodeName
@@ -306,9 +309,9 @@ func GatewayInit(clusterIPSubnet, nodeName, nicIP, physicalInterface,
 
 		// Flush the IP address of the physical interface.
 		_, err = exec.Command("ip", "addr", "flush", "dev", physicalInterface).CombinedOutput()
-		if err != nil {
-			return err
-		}
+		//if err != nil {
+		//	return err
+		//}
 	} else {
 		// A OVS bridge's mac address can change when ports are added to it.
 		// We cannot let that happen, so make the bridge mac address permanent.
@@ -449,5 +452,6 @@ func GatewayInit(clusterIPSubnet, nodeName, nicIP, physicalInterface,
 			}
 		}
 	}
+	logrus.Errorf("La final")
 	return nil
 }

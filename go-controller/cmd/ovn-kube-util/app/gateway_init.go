@@ -2,7 +2,7 @@ package app
 
 import (
 	"fmt"
-
+	"github.com/sirupsen/logrus"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/urfave/cli"
@@ -55,36 +55,43 @@ var InitGatewayCmd = cli.Command{
 }
 
 func initGateway(context *cli.Context) error {
+	logrus.Errorf("Test1")
 	if _, err := config.InitConfig(context, &config.Defaults{OvnNorthAddress: true}); err != nil {
 		return err
 	}
 
+	logrus.Errorf("Test2")
 	clusterIPSubnet := context.String("cluster-ip-subnet")
 	if clusterIPSubnet == "" {
 		return fmt.Errorf("argument --cluster-ip-subnet should be non-null")
 	}
 
+	logrus.Errorf("Test3")
 	nodeName := context.String("node-name")
 	if nodeName == "" {
 		return fmt.Errorf("argument --node-name should be non-null")
 	}
 
+	logrus.Errorf("Test4")
 	physicalIP := context.String("physical-ip")
 	if physicalIP == "" {
 		return fmt.Errorf("argument --physical-ip should be non-null")
 	}
 
+	logrus.Errorf("Test5")
 	physicalInterface := context.String("physical-interface")
 	bridgeInterface := context.String("bridge-interface")
 	defaultGW := context.String("default-gw")
 	rampoutIPSubnet := context.String("rampout-ip-subnet")
 	enableLB := context.Bool("enable-load-balancers")
 
+	logrus.Errorf("Test6")
 	// We want either of args.physical_interface or args.bridge_interface provided. But not both. (XOR)
 	if (len(physicalInterface) == 0 && len(bridgeInterface) == 0) || (len(physicalInterface) != 0 && len(bridgeInterface) != 0) {
 		return fmt.Errorf("One of physical-interface or bridge-interface has to be specified")
 	}
 
+	logrus.Errorf("Test7")
 	return util.GatewayInit(clusterIPSubnet, nodeName, physicalIP,
 		physicalInterface, bridgeInterface, defaultGW, rampoutIPSubnet,
 		enableLB)

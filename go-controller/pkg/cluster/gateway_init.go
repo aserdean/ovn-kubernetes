@@ -301,6 +301,7 @@ func (cluster *OvnClusterController) nodePortWatcher() error {
 
 func (cluster *OvnClusterController) initGateway(
 	nodeName, clusterIPSubnet, subnet string) error {
+	logrus.Errorf("Si am ajuns aici")
 	if cluster.GatewayNextHop == "" || cluster.GatewayIntf == "" {
 		// We need to get the interface details from the default gateway.
 		gatewayIntf, gatewayNextHop, err := getDefaultGatewayInterfaceDetails()
