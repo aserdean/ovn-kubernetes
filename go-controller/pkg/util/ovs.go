@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	ovsCommandTimeout = 5
+	ovsCommandTimeout = 15
 	ovsVsctlCommand   = "ovs-vsctl"
 	ovsOfctlCommand   = "ovs-ofctl"
 	ovnNbctlCommand   = "ovn-nbctl"
