@@ -14,7 +14,6 @@
       Remove-ItemProperty $RegROPath "OVN_Init_Node" -ErrorAction SilentlyContinue
       #TODO figure why they don't get automatically included
       Import-Module "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\HostNetworkingService\HostNetworkingService.psm1"
-      Get-HNSNetwork
       Import-Module "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\OVS\OVS.psm1"
       Import-Module "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\HNSHelper\HNSHelper.psm1"
 
@@ -32,8 +31,6 @@
       Start-Service ovs-vswitchd
       sleep 2
       Restart-Service ovs-vswitchd
-      # Clone the MAC addr
-      # TODO: Carry over MTU to the management interface
       $GUID = (New-Guid).Guid
       ovs-vsctl set Open_vSwitch . external_ids:system-id="$($GUID)"
       ovs-vsctl set Open_vSwitch . external_ids:k8s-api-server="http://{{ kubernetes_info.MASTER_IP }}:8080"
