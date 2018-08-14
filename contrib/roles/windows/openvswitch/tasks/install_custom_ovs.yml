@@ -15,15 +15,20 @@
     timeout: 60
   retries: 3
 
-- name: OVS | Download certificate beta
-  win_get_url:
-    url: "{{ovs_certs_link}}"
-    dest: "{{ovs_info.tmp_dir}}\\certificate.cer"
-    timeout: 60
-  retries: 3
+#- name: OVS | Download certificate beta
+#  win_get_url:
+#    url: "{{ovs_certs_link}}"
+#    dest: "{{ovs_info.tmp_dir}}\\certificate.cer"
+#    timeout: 60
+#  retries: 3
 
 - name: OVS | Install certificate
   win_shell: |
+    $driverFile = "{{ovs_info.tmp_dir}}\\ovs.msi"
+    $outputFile = "{{ovs_info.tmp_dir}}\\certificate.cer"
+    $exportType = [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
+    $cert = (Get-AuthenticodeSignature $driverFile).SignerCertificate
+    [System.IO.File]::WriteAllBytes($outputFile, $cert.Export($exportType))
     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2("{{ovs_info.tmp_dir}}\certificate.cer")
     $rootStore = Get-Item cert:\LocalMachine\TrustedPublisher
     $rootStore.Open("ReadWrite")
@@ -39,7 +44,7 @@
     path: "{{ovs_info.tmp_dir}}\\ovs.msi"
     wait: yes
     state: present
-    arguments: ADDLOCAL="OpenvSwitchServices,OpenvSwitchCLI,OpenvSwitchDriver,OVNHost"
+    arguments: ADDLOCAL="OpenvSwitchCLI,OpenvSwitchDriver,OVNHost"
 
 - name: OVS | Restarting after OVS install
   win_reboot:
