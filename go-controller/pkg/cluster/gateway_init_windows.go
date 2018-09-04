@@ -7,7 +7,6 @@ import (
 	"net"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
@@ -315,15 +314,15 @@ func (cluster *OvnClusterController) initGateway(
 			}
 
 			// Is intfName a port of cluster.GatewayIntf?
-			intfName := util.GetNicName(cluster.GatewayIntf)
+			intfName := "vEthernet (eth0)"
 			_, stderr, err := util.RunOVSVsctl("--if-exists", "get",
 				"interface", intfName, "ofport")
 			if err != nil {
 				return fmt.Errorf("failed to get ofport of %s, stderr: %q, error: %v",
 					intfName, stderr, err)
 			}
-			cluster.GatewayBridge = cluster.GatewayIntf
-			cluster.GatewayIntf = intfName
+			cluster.GatewayBridge = "vEthernet (eth0)"
+			cluster.GatewayIntf = "vEthernet (eth0)"
 		}
 
 		// Now, we get IP address from OVS bridge. If IP does not exist,
