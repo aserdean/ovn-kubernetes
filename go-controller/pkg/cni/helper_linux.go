@@ -1,6 +1,6 @@
 // +build linux
 
-package app
+package cni
 
 import (
 	"fmt"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ns"
@@ -102,14 +101,14 @@ func setupInterface(netns ns.NetNS, containerID, ifName, macAddress, ipAddress, 
 }
 
 // ConfigureInterface sets up the container interface
-func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, macAddress string, ipAddress string, gatewayIP string, mtu int) ([]*current.Interface, error) {
-	netns, err := ns.GetNS(args.Netns)
+func (pr *PodRequest) ConfigureInterface(namespace string, podName string, macAddress string, ipAddress string, gatewayIP string, mtu int, ingress, egress int64) ([]*current.Interface, error) {
+	netns, err := ns.GetNS(pr.Netns)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
+		return nil, fmt.Errorf("failed to open netns %q: %v", pr.Netns, err)
 	}
 	defer netns.Close()
 
-	hostIface, contIface, err := setupInterface(netns, args.ContainerID, args.IfName, macAddress, ipAddress, gatewayIP, mtu)
+	hostIface, contIface, err := setupInterface(netns, pr.SandboxID, pr.IfName, macAddress, ipAddress, gatewayIP, mtu)
 	if err != nil {
 		return nil, err
 	}
@@ -122,19 +121,36 @@ func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, ma
 		fmt.Sprintf("external_ids:attached_mac=%s", macAddress),
 		fmt.Sprintf("external_ids:iface-id=%s", ifaceID),
 		fmt.Sprintf("external_ids:ip_address=%s", ipAddress),
+		fmt.Sprintf("external_ids:sandbox=%s", pr.SandboxID),
 	}
-	var out []byte
-	out, err = exec.Command("ovs-vsctl", ovsArgs...).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("failure in plugging pod interface: %v\n  %q", err, string(out))
+	if out, err := ovsExec(ovsArgs...); err != nil {
+		return nil, fmt.Errorf("failure in plugging pod interface: %v\n  %q", err, out)
+	}
+
+	if err := clearPodBandwidth(pr.SandboxID); err != nil {
+		return nil, err
+	}
+	if ingress > 0 || egress > 0 {
+		l, err := netlink.LinkByName(hostIface.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find host veth interface %s: %v", hostIface.Name, err)
+		}
+		err = netlink.LinkSetTxQLen(l, 1000)
+		if err != nil {
+			return nil, fmt.Errorf("failed to set host veth txqlen: %v", err)
+		}
+
+		if err := setPodBandwidth(pr.SandboxID, hostIface.Name, ingress, egress); err != nil {
+			return nil, err
+		}
 	}
 
 	return []*current.Interface{hostIface, contIface}, nil
 }
 
 // PlatformSpecificCleanup deletes the OVS port
-func PlatformSpecificCleanup(args *skel.CmdArgs, argsMap map[string]string) error {
-	ifaceName := args.ContainerID[:15]
+func (pr *PodRequest) PlatformSpecificCleanup() error {
+	ifaceName := pr.SandboxID[:15]
 	ovsArgs := []string{
 		"del-port", "br-int", ifaceName,
 	}
@@ -143,5 +159,8 @@ func PlatformSpecificCleanup(args *skel.CmdArgs, argsMap map[string]string) erro
 		// DEL should be idempotent; don't return an error just log it
 		logrus.Warningf("failed to delete OVS port %s: %v\n  %q", ifaceName, err, string(out))
 	}
+
+	_ = clearPodBandwidth(pr.SandboxID)
+
 	return nil
 }

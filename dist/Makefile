@@ -5,6 +5,11 @@
 # notice and this notice are preserved.  This file is offered as-is,
 # without warranty of any kind.
 
+#
+# The rpms can be made from a release version, make rpm, or from a
+# commit, make snapshot. In either case the spec file needs to be
+# edited for the version or commit number.
+#
 
 # Build distribution SRPM and RPMs based on version number specified
 # in the openvswitch-ovn-kubernetes.spec file
@@ -34,6 +39,14 @@ rpmsnap: distsnap
 	rpmbuild --define "_sourcedir `pwd`" --define "_specdir `pwd`" \
 	--define "_rpmdir `pwd`" --define "_srcrpmdir `pwd`" \
 	-ba openvswitch-ovn-kubernetes.spec.snapshot
+
+.PHONY: ../go-controller/_output/go/bin/ovnkube
+
+../go-controller/_output/go/bin/ovnkube:
+	cd ../go-controller ; make
+
+container: ../go-controller/_output/go/bin/ovnkube
+	cp ../go-controller/_output/go/bin/* images
 
 .PHONY: clean
 clean:

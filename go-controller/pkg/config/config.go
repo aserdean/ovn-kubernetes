@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -14,6 +13,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	gcfg "gopkg.in/gcfg.v1"
+
+	kexec "k8s.io/utils/exec"
 )
 
 // The following are global config parameters that other modules may access directly
@@ -23,10 +24,11 @@ var (
 
 	// Default holds parsed config file parameters and command-line overrides
 	Default = DefaultConfig{
-		MTU:           1400,
-		ConntrackZone: 64000,
-		EncapType:     "geneve",
-		EncapIP:       "",
+		MTU:             1400,
+		ConntrackZone:   64000,
+		EncapType:       "geneve",
+		EncapIP:         "",
+		InactivityProbe: 100000,
 	}
 
 	// Logging holds logging-related parsed config file parameters and command-line overrides
@@ -68,6 +70,9 @@ type DefaultConfig struct {
 	// The IP address of the encapsulation endpoint. If not specified, the IP address the
 	// NodeName resolves to will be used
 	EncapIP string `gcfg:"encap-ip"`
+	// Maximum number of milliseconds of idle time on connection that
+	// ovn-controller waits before it will send a connection health probe.
+	InactivityProbe int `gcfg:"inactivity-probe"`
 }
 
 // LoggingConfig holds logging-related parsed config file parameters and command-line overrides
@@ -127,7 +132,7 @@ const (
 	OvnDBSchemeUnix OvnDBScheme = "unix"
 )
 
-// config is used to read the structured config file
+// Config is used to read the structured config file and to cache config in testcases
 type config struct {
 	Default    DefaultConfig
 	Logging    LoggingConfig
@@ -135,6 +140,36 @@ type config struct {
 	Kubernetes KubernetesConfig
 	OvnNorth   rawOvnAuthConfig
 	OvnSouth   rawOvnAuthConfig
+}
+
+var (
+	savedDefault    DefaultConfig
+	savedLogging    LoggingConfig
+	savedCNI        CNIConfig
+	savedKubernetes KubernetesConfig
+	savedOvnNorth   OvnAuthConfig
+	savedOvnSouth   OvnAuthConfig
+)
+
+func init() {
+	// Cache original default config values so they can be restored by testcases
+	savedDefault = Default
+	savedLogging = Logging
+	savedCNI = CNI
+	savedKubernetes = Kubernetes
+	savedOvnNorth = OvnNorth
+	savedOvnSouth = OvnSouth
+}
+
+// RestoreDefaultConfig restores default config values. Used by testcases to
+// provide a pristine environment between tests.
+func RestoreDefaultConfig() {
+	Default = savedDefault
+	Logging = savedLogging
+	CNI = savedCNI
+	Kubernetes = savedKubernetes
+	OvnNorth = savedOvnNorth
+	OvnSouth = savedOvnSouth
 }
 
 // copy members of struct 'src' into the corresponding field in struct 'dst'
@@ -202,6 +237,12 @@ var Flags = []cli.Flag{
 		Usage:       "The IP address of the encapsulation endpoint (default: Node IP address resolved from Node hostname)",
 		Destination: &cliConfig.Default.EncapIP,
 	},
+	cli.IntFlag{
+		Name: "inactivity-probe",
+		Usage: "Maximum number of milliseconds of idle time on " +
+			"connection for ovn-controller before it sends a inactivity probe",
+		Destination: &cliConfig.Default.InactivityProbe,
+	},
 
 	// Logging options
 	cli.IntFlag{
@@ -256,8 +297,10 @@ var Flags = []cli.Flag{
 
 	// OVN northbound database options
 	cli.StringFlag{
-		Name:        "nb-address",
-		Usage:       "IP address and port of the OVN northbound API (eg, ssl://1.2.3.4:6641).  Leave empty to use a local unix socket.",
+		Name: "nb-address",
+		Usage: "IP address and port of the OVN northbound API " +
+			"(eg, ssl://1.2.3.4:6641,ssl://1.2.3.5:6642).  Leave empty to " +
+			"use a local unix socket.",
 		Destination: &cliConfig.OvnNorth.Address,
 	},
 	cli.StringFlag{
@@ -293,8 +336,10 @@ var Flags = []cli.Flag{
 
 	// OVN southbound database options
 	cli.StringFlag{
-		Name:        "sb-address",
-		Usage:       "IP address and port of the OVN southbound API (eg, ssl://1.2.3.4:6642).  Leave empty to use a local unix socket.",
+		Name: "sb-address",
+		Usage: "IP address and port of the OVN southbound API " +
+			"(eg, ssl://1.2.3.4:6642,ssl://1.2.3.5:6642).  " +
+			"Leave empty to use a local unix socket.",
 		Destination: &cliConfig.OvnSouth.Address,
 	},
 	cli.StringFlag{
@@ -344,22 +389,33 @@ const (
 )
 
 // Can't use pkg/ovs or pkg/util here because those package import this one
-func runOVSVsctl(args ...string) (string, error) {
-	cmdPath, err := exec.LookPath(ovsVsctlCommand)
+func rawExec(exec kexec.Interface, cmd string, args ...string) (string, error) {
+	cmdPath, err := exec.LookPath(cmd)
 	if err != nil {
 		return "", err
 	}
 
-	newArgs := append([]string{"--timeout=5"}, args...)
-	out, err := exec.Command(cmdPath, newArgs...).CombinedOutput()
+	logrus.Debugf("exec: %s %s", cmdPath, strings.Join(args, " "))
+	out, err := exec.Command(cmdPath, args...).CombinedOutput()
 	if err != nil {
+		logrus.Debugf("exec: %s %s => %v", cmdPath, strings.Join(args, " "), err)
 		return "", err
 	}
-	return strings.Trim(strings.TrimSpace(string(out)), "\""), nil
+	return strings.TrimSpace(string(out)), nil
 }
 
-func getOVSExternalID(name string) string {
-	out, err := runOVSVsctl(
+// Can't use pkg/ovs or pkg/util here because those package import this one
+func runOVSVsctl(exec kexec.Interface, args ...string) (string, error) {
+	newArgs := append([]string{"--timeout=15"}, args...)
+	out, err := rawExec(exec, ovsVsctlCommand, newArgs...)
+	if err != nil {
+		return "", err
+	}
+	return strings.Trim(strings.TrimSpace(out), "\""), nil
+}
+
+func getOVSExternalID(exec kexec.Interface, name string) string {
+	out, err := runOVSVsctl(exec,
 		"--if-exists",
 		"get",
 		"Open_vSwitch",
@@ -372,8 +428,8 @@ func getOVSExternalID(name string) string {
 	return out
 }
 
-func setOVSExternalID(key, value string) error {
-	out, err := runOVSVsctl(
+func setOVSExternalID(exec kexec.Interface, key, value string) error {
+	out, err := runOVSVsctl(exec,
 		"set",
 		"Open_vSwitch",
 		".",
@@ -384,16 +440,16 @@ func setOVSExternalID(key, value string) error {
 	return nil
 }
 
-func buildKubernetesConfig(cli, file *config, defaults *Defaults) error {
+func buildKubernetesConfig(exec kexec.Interface, cli, file *config, defaults *Defaults) error {
 	// Grab default values from OVS external IDs
 	if defaults.K8sAPIServer {
-		Kubernetes.APIServer = getOVSExternalID("k8s-api-server")
+		Kubernetes.APIServer = getOVSExternalID(exec, "k8s-api-server")
 	}
 	if defaults.K8sToken {
-		Kubernetes.Token = getOVSExternalID("k8s-api-token")
+		Kubernetes.Token = getOVSExternalID(exec, "k8s-api-token")
 	}
 	if defaults.K8sCert {
-		Kubernetes.CACert = getOVSExternalID("k8s-ca-certificate")
+		Kubernetes.CACert = getOVSExternalID(exec, "k8s-ca-certificate")
 	}
 
 	// Copy config file values over default values
@@ -415,13 +471,10 @@ func buildKubernetesConfig(cli, file *config, defaults *Defaults) error {
 		return fmt.Errorf("kubernetes API server URL scheme %q invalid", url.Scheme)
 	}
 
-	if strings.HasPrefix(Kubernetes.APIServer, "https") && Kubernetes.CACert == "" {
-		return fmt.Errorf("kubernetes API server %q scheme requires a CA certificate", Kubernetes.APIServer)
-	}
 	return nil
 }
 
-func buildOvnAuth(direction, externalID string, cliAuth, confAuth *rawOvnAuthConfig, readAddress bool) (OvnAuthConfig, error) {
+func buildOvnAuth(exec kexec.Interface, direction, externalID string, cliAuth, confAuth *rawOvnAuthConfig, readAddress bool) (OvnAuthConfig, error) {
 	ctlCmd := "ovn-" + direction + "ctl"
 
 	// Determine final address so we know how to set cert/key defaults
@@ -430,10 +483,7 @@ func buildOvnAuth(direction, externalID string, cliAuth, confAuth *rawOvnAuthCon
 		address = confAuth.Address
 	}
 	if address == "" && readAddress {
-		address = getOVSExternalID("ovn-" + direction)
-		// address will be in format ssl:1.2.3.4:6641 from external_ids,
-		// but we want it in url format, i.e. ssl://1.2.3.4:6641
-		address = strings.Replace(address, ":", "://", 1)
+		address = getOVSExternalID(exec, "ovn-"+direction)
 	}
 
 	auth := &rawOvnAuthConfig{Address: address}
@@ -449,11 +499,11 @@ func buildOvnAuth(direction, externalID string, cliAuth, confAuth *rawOvnAuthCon
 	overrideFields(auth, confAuth)
 	overrideFields(auth, cliAuth)
 
-	clientAuth, err := newOvnDBAuth(ctlCmd, externalID, auth.Address, auth.ClientPrivKey, auth.ClientCert, auth.ClientCACert, false)
+	clientAuth, err := newOvnDBAuth(exec, ctlCmd, externalID, auth.Address, auth.ClientPrivKey, auth.ClientCert, auth.ClientCACert, false)
 	if err != nil {
 		return OvnAuthConfig{}, err
 	}
-	serverAuth, err := newOvnDBAuth(ctlCmd, externalID, auth.Address, auth.ServerPrivKey, auth.ServerCert, auth.ServerCACert, true)
+	serverAuth, err := newOvnDBAuth(exec, ctlCmd, externalID, auth.Address, auth.ServerPrivKey, auth.ServerCert, auth.ServerCACert, true)
 	if err != nil {
 		return OvnAuthConfig{}, err
 	}
@@ -485,15 +535,15 @@ func getConfigFilePath(ctx *cli.Context) (string, bool) {
 // InitConfig reads the config file and common command-line options and
 // constructs the global config object from them. It returns the config file
 // path (if explicitly specified) or an error
-func InitConfig(ctx *cli.Context, defaults *Defaults) (string, error) {
-	return InitConfigWithPath(ctx, "", defaults)
+func InitConfig(ctx *cli.Context, exec kexec.Interface, defaults *Defaults) (string, error) {
+	return InitConfigWithPath(ctx, exec, "", defaults)
 }
 
 // InitConfigWithPath reads the given config file (or if empty, reads the config file
 // specified by command-line arguments, or empty, the default config file) and
 // common command-line options and constructs the global config object from
 // them. It returns the config file path (if explicitly specified) or an error
-func InitConfigWithPath(ctx *cli.Context, configFile string, defaults *Defaults) (string, error) {
+func InitConfigWithPath(ctx *cli.Context, exec kexec.Interface, configFile string, defaults *Defaults) (string, error) {
 	var cfg config
 	var retConfigFile string
 	var configFileIsDefault bool
@@ -551,16 +601,16 @@ func InitConfigWithPath(ctx *cli.Context, configFile string, defaults *Defaults)
 		}
 	}
 
-	if err = buildKubernetesConfig(&cliConfig, &cfg, defaults); err != nil {
+	if err = buildKubernetesConfig(exec, &cliConfig, &cfg, defaults); err != nil {
 		return "", err
 	}
 
-	OvnNorth, err = buildOvnAuth("nb", "ovn-nb", &cliConfig.OvnNorth, &cfg.OvnNorth, defaults.OvnNorthAddress)
+	OvnNorth, err = buildOvnAuth(exec, "nb", "ovn-nb", &cliConfig.OvnNorth, &cfg.OvnNorth, defaults.OvnNorthAddress)
 	if err != nil {
 		return "", err
 	}
 
-	OvnSouth, err = buildOvnAuth("sb", "ovn-remote", &cliConfig.OvnSouth, &cfg.OvnSouth, false)
+	OvnSouth, err = buildOvnAuth(exec, "sb", "ovn-remote", &cliConfig.OvnSouth, &cfg.OvnSouth, false)
 	if err != nil {
 		return "", err
 	}
@@ -576,17 +626,18 @@ func InitConfigWithPath(ctx *cli.Context, configFile string, defaults *Defaults)
 
 // OvnDBAuth describes an OVN database location and authentication method
 type OvnDBAuth struct {
-	URL     string
-	PrivKey string
-	Cert    string
-	CACert  string
-	Scheme  OvnDBScheme
+	OvnAddressForClient string // e.g: "ssl:192.168.1.2:6641,ssl:192.168.1.2:6642"
+	OvnAddressForServer string // e.g: "pssl:6641"
+	PrivKey             string
+	Cert                string
+	CACert              string
+	Scheme              OvnDBScheme
 
 	server     bool
-	host       string
-	port       string
-	ctlCmd     string
-	externalID string
+	ctlCmd     string // e.g: ovn-nbctl
+	externalID string // ovn-nb or ovn-remote
+
+	exec kexec.Interface
 }
 
 func pathExists(path string) bool {
@@ -600,7 +651,7 @@ func pathExists(path string) bool {
 // newOvnDBAuth returns an OvnDBAuth object describing the connection to an
 // OVN database, given a connection description string and authentication
 // details
-func newOvnDBAuth(ctlCmd, externalID, urlString, privkey, cert, cacert string, server bool) (*OvnDBAuth, error) {
+func newOvnDBAuth(exec kexec.Interface, ctlCmd, externalID, urlString, privkey, cert, cacert string, server bool) (*OvnDBAuth, error) {
 	if urlString == "" {
 		if privkey != "" || cert != "" || cacert != "" {
 			return nil, fmt.Errorf("certificate or key given; perhaps you mean to use the 'ssl' scheme?")
@@ -610,34 +661,64 @@ func newOvnDBAuth(ctlCmd, externalID, urlString, privkey, cert, cacert string, s
 			Scheme:     OvnDBSchemeUnix,
 			ctlCmd:     ctlCmd,
 			externalID: externalID,
+			exec:       exec,
 		}, nil
 	}
 
-	url, err := url.Parse(urlString)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse OVN DB URL %q: %v", urlString, err)
-	}
-	host, port, err := net.SplitHostPort(url.Host)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse OVN DB host/port %q: %v", url.Host, err)
-	}
-	// OVN requires the --db argument to be an IP, not a DNS name
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil, fmt.Errorf("OVN DB host %q must be an IP address, not a DNS name", url.Host)
-	}
-
 	auth := &OvnDBAuth{
-		URL:        urlString,
 		server:     server,
-		host:       host,
-		port:       port,
 		ctlCmd:     ctlCmd,
 		externalID: externalID,
+		exec:       exec,
+	}
+
+	// urlString can be of form "ssl:1.2.3.4:6641,ssl:1.2.3.5:6641" or
+	// "ssl://1.2.3.4:6641,ssl://1.2.3.5:6641"
+	scheme := ""
+	urlString = strings.Replace(urlString, "//", "", -1)
+	ovnAddresses := strings.Split(urlString, ",")
+	for _, ovnAddress := range ovnAddresses {
+		splits := strings.Split(ovnAddress, ":")
+		if len(splits) != 3 {
+			return nil, fmt.Errorf("Failed to parse OVN address %s", urlString)
+		}
+		hostPort := splits[1] + ":" + splits[2]
+
+		if scheme == "" {
+			scheme = splits[0]
+		} else if scheme != splits[0] {
+			return nil, fmt.Errorf("Invalid protocols in OVN address %s",
+				urlString)
+		}
+
+		host, port, err := net.SplitHostPort(hostPort)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse OVN DB host/port %q: %v",
+				hostPort, err)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return nil, fmt.Errorf("OVN DB host %q must be an IP address, "+
+				"not a DNS name", hostPort)
+		}
+
+		if server && auth.OvnAddressForServer == "" {
+			auth.OvnAddressForServer = fmt.Sprintf("p%s:%s", scheme, port)
+		}
+
+		if !server {
+			if auth.OvnAddressForClient == "" {
+				auth.OvnAddressForClient = fmt.Sprintf("%s:%s:%s",
+					scheme, host, port)
+			} else {
+				auth.OvnAddressForClient = fmt.Sprintf("%s,%s:%s:%s",
+					auth.OvnAddressForClient, scheme, host, port)
+			}
+		}
 	}
 
 	switch {
-	case url.Scheme == "ssl":
+	case scheme == "ssl":
 		if privkey == "" || cert == "" || cacert == "" {
 			return nil, fmt.Errorf("must specify private key, certificate, and CA certificate for 'ssl' scheme")
 		}
@@ -645,13 +726,13 @@ func newOvnDBAuth(ctlCmd, externalID, urlString, privkey, cert, cacert string, s
 		auth.PrivKey = privkey
 		auth.Cert = cert
 		auth.CACert = cacert
-	case url.Scheme == "tcp":
+	case scheme == "tcp":
 		if privkey != "" || cert != "" || cacert != "" {
 			return nil, fmt.Errorf("certificate or key given; perhaps you mean to use the 'ssl' scheme?")
 		}
 		auth.Scheme = OvnDBSchemeTCP
 	default:
-		return nil, fmt.Errorf("unknown OVN DB scheme %q", url.Scheme)
+		return nil, fmt.Errorf("unknown OVN DB scheme %q", scheme)
 	}
 
 	return auth, nil
@@ -673,24 +754,18 @@ func (a *OvnDBAuth) ensureCACert() error {
 	// 2.9.90+.
 	// FIXME: change back to a.ctlCmd when sbctl supports --bootstrap-ca-cert
 	// https://github.com/openvswitch/ovs/pull/226
-	cmdPath, err := exec.LookPath("ovn-nbctl")
-	if err != nil {
-		return err
-	}
-
 	args := []string{
 		"--db=" + a.GetURL(),
 		"--timeout=5",
 	}
 	if a.Scheme == OvnDBSchemeSSL {
 		args = append(args, "--private-key="+a.PrivKey)
-
 		args = append(args, "--certificate="+a.Cert)
 		args = append(args, "--bootstrap-ca-cert="+a.CACert)
 	}
 	args = append(args, "list", "nb_global")
-	_ = exec.Command(cmdPath, args...).Run()
-	if _, err = os.Stat(a.CACert); os.IsNotExist(err) {
+	_, _ = rawExec(a.exec, "ovn-nbctl", args...)
+	if _, err := os.Stat(a.CACert); os.IsNotExist(err) {
 		logrus.Warnf("bootstrapping %s CA certificate failed", a.CACert)
 	}
 	return nil
@@ -701,9 +776,9 @@ func (a *OvnDBAuth) ensureCACert() error {
 func (a *OvnDBAuth) GetURL() string {
 	// FIXME: support specific IP Addresses or non-default Unix socket paths
 	if a.server {
-		return fmt.Sprintf("p%s:%s", a.Scheme, a.port)
+		return a.OvnAddressForServer
 	}
-	return fmt.Sprintf("%s:%s:%s", a.Scheme, a.host, a.port)
+	return a.OvnAddressForClient
 }
 
 // SetDBAuth sets the authentication configuration and connection method
@@ -723,10 +798,13 @@ func (a *OvnDBAuth) SetDBAuth() error {
 	}
 
 	if a.server {
-		// Set the database connection method
-		out, err := exec.Command(a.ctlCmd, "set-connection", a.GetURL()).CombinedOutput()
+		// Set the database connection method. Also set the inactivity_probe
+		// to zero as a server need not try to maintain connections to the
+		// client via OVSDB echo request/responses on top of a TCP connection.
+		out, err := rawExec(a.exec, a.ctlCmd, "set-connection", a.GetURL(),
+			"--", "set", "connection", ".", "inactivity_probe=0")
 		if err != nil {
-			return fmt.Errorf("error setting %s API connection: %v\n  %q", a.ctlCmd, err, string(out))
+			return fmt.Errorf("error setting %s API connection: %v\n  %q", a.ctlCmd, err, out)
 		}
 
 		if a.Scheme == OvnDBSchemeSSL {
@@ -736,13 +814,13 @@ func (a *OvnDBAuth) SetDBAuth() error {
 			}
 			// Tell the database what SSL keys and certs to use, but before that delete
 			// any SSL configuration. Otherwise, ovn-{nbctl|sbctl} set-ssl command will hang
-			out, err = exec.Command(a.ctlCmd, "del-ssl").CombinedOutput()
+			out, err = rawExec(a.exec, a.ctlCmd, "del-ssl")
 			if err != nil {
-				return fmt.Errorf("error deleting %s SSL configuration: %v\n %q", a.ctlCmd, err, string(out))
+				return fmt.Errorf("error deleting %s SSL configuration: %v\n %q", a.ctlCmd, err, out)
 			}
-			out, err = exec.Command(a.ctlCmd, "set-ssl", a.PrivKey, a.Cert, a.CACert).CombinedOutput()
+			out, err = rawExec(a.exec, a.ctlCmd, "set-ssl", a.PrivKey, a.Cert, a.CACert)
 			if err != nil {
-				return fmt.Errorf("error setting %s SSL API certificates: %v\n  %q", a.ctlCmd, err, string(out))
+				return fmt.Errorf("error setting %s SSL API certificates: %v\n  %q", a.ctlCmd, err, out)
 			}
 		}
 	} else {
@@ -757,22 +835,34 @@ func (a *OvnDBAuth) SetDBAuth() error {
 			// Must happen *before* setting the "ovn-remote"
 			// external-id.
 			if a.ctlCmd == "ovn-sbctl" {
-				out, err := runOVSVsctl("del-ssl")
+				out, err := runOVSVsctl(a.exec, "del-ssl")
 				if err != nil {
 					return fmt.Errorf("error deleting ovs-vsctl SSL "+
 						"configuration: %q (%v)", out, err)
 				}
 
-				out, err = runOVSVsctl("set-ssl", a.PrivKey, a.Cert, a.CACert)
+				out, err = runOVSVsctl(a.exec, "set-ssl", a.PrivKey, a.Cert, a.CACert)
 				if err != nil {
 					return fmt.Errorf("error setting client southbound DB SSL options: %v\n  %q", err, out)
 				}
 			}
 		}
 
-		if err := setOVSExternalID(a.externalID, "\""+a.GetURL()+"\""); err != nil {
+		if err := setOVSExternalID(a.exec, a.externalID, "\""+a.GetURL()+"\""); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (a *OvnDBAuth) updateIP(newIP string) error {
+	if a.OvnAddressForClient != "" {
+		s := strings.Split(a.OvnAddressForClient, ":")
+		if len(s) != 3 {
+			return fmt.Errorf("failed to parse OvnDBAuth "+
+				"a.OvnAddressForClient: %q", a.OvnAddressForClient)
+		}
+		a.OvnAddressForClient = s[0] + ":" + newIP + s[2]
 	}
 	return nil
 }
@@ -780,49 +870,19 @@ func (a *OvnDBAuth) SetDBAuth() error {
 // UpdateOvnNodeAuth updates the host and URL in ClientAuth and ServerAuth
 // for both OvnNorth and OvnSouth. It updates them with the new masterIP.
 func UpdateOvnNodeAuth(masterIP string) error {
-	var err error
 	logrus.Debugf("Update OVN node auth with new master ip: %s", masterIP)
-	OvnNorth.ClientAuth.host = masterIP
-	OvnNorth.ClientAuth.URL, err = updateURLString(
-		OvnNorth.ClientAuth.URL, masterIP)
-	if err != nil {
-		logrus.Errorf("Failed to update OvnNorth ClientAuth URL: %v", err)
-		return err
+	if err := OvnNorth.ClientAuth.updateIP(masterIP); err != nil {
+		return fmt.Errorf("failed to update OvnNorth ClientAuth URL: %v", err)
 	}
-	OvnNorth.ServerAuth.host = masterIP
-	OvnNorth.ServerAuth.URL, err = updateURLString(
-		OvnNorth.ServerAuth.URL, masterIP)
-	if err != nil {
-		logrus.Errorf("Failed to update OvnNorth ServerAuth URL: %v", err)
-		return err
-	}
-	OvnSouth.ClientAuth.host = masterIP
-	OvnSouth.ClientAuth.URL, err = updateURLString(
-		OvnSouth.ClientAuth.URL, masterIP)
-	if err != nil {
-		logrus.Errorf("Failed to update OvnSouth ClientAuth URL: %v", err)
-		return err
-	}
-	OvnSouth.ServerAuth.host = masterIP
-	OvnSouth.ServerAuth.URL, err = updateURLString(
-		OvnSouth.ServerAuth.URL, masterIP)
-	if err != nil {
-		logrus.Errorf("Failed to update OvnSouth ServerAuth URL: %v", err)
-		return err
+	if err := OvnNorth.ServerAuth.updateIP(masterIP); err != nil {
+		return fmt.Errorf("failed to update OvnNorth ServerAuth URL: %v", err)
 	}
 
+	if err := OvnSouth.ClientAuth.updateIP(masterIP); err != nil {
+		return fmt.Errorf("failed to update OvnSouth ClientAuth URL: %v", err)
+	}
+	if err := OvnSouth.ServerAuth.updateIP(masterIP); err != nil {
+		return fmt.Errorf("failed to update OvnSouth ServerAuth URL: %v", err)
+	}
 	return nil
-}
-
-func updateURLString(urlString, newIP string) (string, error) {
-	if urlString == "" {
-		return "", nil
-	}
-	s := strings.Split(urlString, ":")
-	if len(s) != 3 {
-		return "", fmt.Errorf("Failed to parse OVN DB url: %q", urlString)
-	}
-	newURLString := s[0] + ":" + newIP + ":" + s[2]
-	logrus.Debugf("New OVN urlString: %q", newURLString)
-	return newURLString, nil
 }

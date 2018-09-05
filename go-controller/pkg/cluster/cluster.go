@@ -3,7 +3,6 @@ package cluster
 import (
 	"fmt"
 	"net"
-	"net/url"
 
 	"github.com/openshift/origin/pkg/util/netutils"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
@@ -30,6 +29,7 @@ type OvnClusterController struct {
 	GatewaySpareIntf bool
 	NodePortEnable   bool
 	OvnHA            bool
+	LocalnetGateway  bool
 }
 
 const (
@@ -71,6 +71,8 @@ func setOVSExternalIDs(nodeName string, ids ...string) error {
 		".",
 		fmt.Sprintf("external_ids:ovn-encap-type=%s", config.Default.EncapType),
 		fmt.Sprintf("external_ids:ovn-encap-ip=%s", nodeIP),
+		fmt.Sprintf("external_ids:ovn-remote-probe-interval=%d",
+			config.Default.InactivityProbe),
 	}
 	for _, str := range ids {
 		args = append(args, "external_ids:"+str)
@@ -92,15 +94,7 @@ func setupOVNNode(nodeName, kubeServer, kubeToken, kubeCACert string) error {
 		}
 	}
 
-	// Tell other utilities (ovn-k8s-cni-overlay, etc) how to talk to Kubernetes
-	if _, err := url.Parse(kubeServer); err != nil {
-		return fmt.Errorf("error parsing k8s server %q: %v", kubeServer, err)
-	}
-	return setOVSExternalIDs(
-		nodeName,
-		fmt.Sprintf("k8s-api-server=\"%s\"", kubeServer),
-		fmt.Sprintf("k8s-api-token=\"%s\"", kubeToken),
-		fmt.Sprintf("k8s-ca-certificate=\"%s\"", kubeCACert))
+	return setOVSExternalIDs(nodeName)
 }
 
 func setupOVNMaster(nodeName string) error {

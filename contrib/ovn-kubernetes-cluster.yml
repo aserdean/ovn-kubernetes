@@ -43,6 +43,13 @@
         name: linux/ovn-kubernetes
     - import_role:
         name: linux/kubernetes
+    - name: Ensure /etc/hosts is updated on kube-master
+      lineinfile:
+        path: /etc/hosts
+        regexp: '{{ansible_hostname}}$'
+        line: '{{host_public_ip}} {{ansible_hostname}}'
+      delegate_to: "{{ item }}"
+      with_items: "{{groups['kube-master']}}"
 
 - hosts: kube-minions-windows
   remote_user: Administrator
@@ -50,6 +57,12 @@
   become_method: runas
   any_errors_fatal: true
   tasks:
+    - set_fact:
+        windows_container_tag: 1709
+      when: ansible_kernel == windows1709
+    - set_fact:
+        windows_container_tag: 1803
+      when: ansible_kernel == windows1803
     - import_role:
         name: windows/version_check
     - import_role:
@@ -62,7 +75,7 @@
         # to install the MSI in unattended mode
         # Setting install_beta_ovs to false will install the latest stable OVS
         install_custom_ovs: true
-        custom_ovs_link: "https://docs.google.com/uc?export=download&id=1QnAtn8EhfbBFwn-1KPCkJ4EqCmEiT8g_"
+        custom_ovs_link: "https://balutoiu.com/ionut/OpenvSwitch.msi"
         ovs_certs_link: "https://docs.google.com/uc?export=download&id=1tGbGalZ6gDQOgjQuWAfIqGCNy-9RTpAF"
         # This is useful for dev purposes and when using custom MSI which is not signed
         bcdedit_needed: true
@@ -70,3 +83,12 @@
         name: windows/ovn-kubernetes
     - import_role:
         name: windows/kubernetes
+    - name: Ensure /etc/hosts is updated on kube-master
+      become: true
+      become_method: sudo
+      lineinfile:
+        path: /etc/hosts
+        regexp: '{{ansible_hostname}}$'
+        line: '{{host_public_ip}} {{ansible_hostname}}'
+      delegate_to: "{{ item }}"
+      with_items: "{{groups['kube-master']}}"

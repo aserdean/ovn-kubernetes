@@ -19,11 +19,11 @@ func (ovn *Controller) getLoadBalancer(protocol kapi.Protocol) (string,
 	var out string
 	var err error
 	if protocol == kapi.ProtocolTCP {
-		out, _, err = util.RunOVNNbctlUnix("--data=bare",
+		out, _, err = util.RunOVNNbctlHA("--data=bare",
 			"--no-heading", "--columns=_uuid", "find", "load_balancer",
 			"external_ids:k8s-cluster-lb-tcp=yes")
 	} else if protocol == kapi.ProtocolUDP {
-		out, _, err = util.RunOVNNbctlUnix("--data=bare", "--no-heading",
+		out, _, err = util.RunOVNNbctlHA("--data=bare", "--no-heading",
 			"--columns=_uuid", "find", "load_balancer",
 			"external_ids:k8s-cluster-lb-udp=yes")
 	}
@@ -37,9 +37,33 @@ func (ovn *Controller) getLoadBalancer(protocol kapi.Protocol) (string,
 	return out, nil
 }
 
+func (ovn *Controller) getDefaultGatewayLoadBalancer(protocol kapi.Protocol) string {
+	if outStr, ok := ovn.loadbalancerGWCache[string(protocol)]; ok {
+		return outStr
+	}
+
+	var gw string
+	gw, _, _ = util.RunOVNNbctlUnix("--data=bare",
+		"--no-heading", "--columns=name", "find", "logical_router",
+		"options:lb_force_snat_ip=100.64.1.2")
+	if len(gw) == 0 {
+		logrus.Errorf("Error locating default gateway")
+		return ""
+	}
+
+	externalIDKey := string(protocol) + "_lb_gateway_router"
+	lb, _, _ := util.RunOVNNbctlUnix("--data=bare",
+		"--no-heading", "--columns=_uuid", "find", "load_balancer",
+		"external_ids:"+externalIDKey+"="+gw)
+	if len(lb) != 0 {
+		ovn.loadbalancerGWCache[string(protocol)] = lb
+	}
+	return lb
+}
+
 func (ovn *Controller) getLoadBalancerVIPS(
 	loadBalancer string) (map[string]interface{}, error) {
-	outStr, _, err := util.RunOVNNbctlUnix("--data=bare", "--no-heading",
+	outStr, _, err := util.RunOVNNbctlHA("--data=bare", "--no-heading",
 		"get", "load_balancer", loadBalancer, "vips")
 	if err != nil {
 		return nil, err
@@ -59,7 +83,7 @@ func (ovn *Controller) getLoadBalancerVIPS(
 
 func (ovn *Controller) deleteLoadBalancerVIP(loadBalancer, vip string) {
 	vipQuotes := fmt.Sprintf("\"%s\"", vip)
-	stdout, stderr, err := util.RunOVNNbctlUnix("--if-exists", "remove",
+	stdout, stderr, err := util.RunOVNNbctlHA("--if-exists", "remove",
 		"load_balancer", loadBalancer, "vips", vipQuotes)
 	if err != nil {
 		logrus.Errorf("Error in deleting load balancer vip %s for %s"+
@@ -76,7 +100,7 @@ func (ovn *Controller) createLoadBalancerVIP(lb string, serviceIP string, port i
 	key := fmt.Sprintf("\"%s:%d\"", serviceIP, port)
 
 	if len(ips) == 0 {
-		_, _, err := util.RunOVNNbctlUnix("remove", "load_balancer", lb,
+		_, _, err := util.RunOVNNbctlHA("remove", "load_balancer", lb,
 			"vips", key)
 		return err
 	}
@@ -91,7 +115,7 @@ func (ovn *Controller) createLoadBalancerVIP(lb string, serviceIP string, port i
 	}
 	target := fmt.Sprintf("vips:\"%s:%d\"=\"%s\"", serviceIP, port, commaSeparatedEndpoints)
 
-	out, stderr, err := util.RunOVNNbctlUnix("set", "load_balancer", lb,
+	out, stderr, err := util.RunOVNNbctlHA("set", "load_balancer", lb,
 		target)
 	if err != nil {
 		logrus.Errorf("Error in creating load balancer: %s "+

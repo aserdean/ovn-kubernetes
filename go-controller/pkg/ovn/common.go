@@ -10,8 +10,8 @@ import (
 	"strings"
 )
 
-// hash the provided input to make it a valid addressSet name.
-func hashedAddressSet(s string) string {
+// hash the provided input to make it a valid addressSet or portGroup name.
+func hashForOVN(s string) string {
 	h := fnv.New64a()
 	_, err := h.Write([]byte(s))
 	if err != nil {
@@ -21,13 +21,23 @@ func hashedAddressSet(s string) string {
 	return fmt.Sprintf("a%s", hashString)
 }
 
+// hash the provided input to make it a valid addressSet name.
+func hashedAddressSet(s string) string {
+	return hashForOVN(s)
+}
+
+// hash the provided input to make it a valid portGroup name.
+func hashedPortGroup(s string) string {
+	return hashForOVN(s)
+}
+
 // forEachAddressSetUnhashedName will pass the unhashedName, namespaceName and
 // the first suffix in the name to the 'iteratorFn' for every address_set in
 // OVN. (Each unhashed name for an addressSet can be of the form
 // namespaceName.suffix1.suffix2. .suffixN)
 func (oc *Controller) forEachAddressSetUnhashedName(iteratorFn func(
 	string, string, string)) error {
-	output, stderr, err := util.RunOVNNbctlUnix("--data=bare", "--no-heading",
+	output, stderr, err := util.RunOVNNbctlHA("--data=bare", "--no-heading",
 		"--columns=external_ids", "find", "address_set")
 	if err != nil {
 		logrus.Errorf("Error in obtaining list of address sets from OVN: "+
@@ -53,7 +63,7 @@ func (oc *Controller) forEachAddressSetUnhashedName(iteratorFn func(
 func (oc *Controller) setAddressSet(hashName string, addresses []string) {
 	logrus.Debugf("setAddressSet for %s with %s", hashName, addresses)
 	if len(addresses) == 0 {
-		_, stderr, err := util.RunOVNNbctlUnix("clear", "address_set",
+		_, stderr, err := util.RunOVNNbctlHA("clear", "address_set",
 			hashName, "addresses")
 		if err != nil {
 			logrus.Errorf("failed to clear address_set, stderr: %q (%v)",
@@ -63,7 +73,7 @@ func (oc *Controller) setAddressSet(hashName string, addresses []string) {
 	}
 
 	ips := strings.Join(addresses, " ")
-	_, stderr, err := util.RunOVNNbctlUnix("set", "address_set",
+	_, stderr, err := util.RunOVNNbctlHA("set", "address_set",
 		hashName, fmt.Sprintf("addresses=%s", ips))
 	if err != nil {
 		logrus.Errorf("failed to set address_set, stderr: %q (%v)",
@@ -74,7 +84,7 @@ func (oc *Controller) setAddressSet(hashName string, addresses []string) {
 func (oc *Controller) createAddressSet(name string, hashName string,
 	addresses []string) {
 	logrus.Debugf("createAddressSet with %s and %s", name, addresses)
-	addressSet, stderr, err := util.RunOVNNbctlUnix("--data=bare",
+	addressSet, stderr, err := util.RunOVNNbctlHA("--data=bare",
 		"--no-heading", "--columns=_uuid", "find", "address_set",
 		fmt.Sprintf("name=%s", hashName))
 	if err != nil {
@@ -85,7 +95,7 @@ func (oc *Controller) createAddressSet(name string, hashName string,
 
 	// addressSet has already been created in the database and nothing to set.
 	if addressSet != "" && len(addresses) == 0 {
-		_, stderr, err = util.RunOVNNbctlUnix("clear", "address_set",
+		_, stderr, err = util.RunOVNNbctlHA("clear", "address_set",
 			hashName, "addresses")
 		if err != nil {
 			logrus.Errorf("failed to clear address_set, stderr: %q (%v)",
@@ -99,7 +109,7 @@ func (oc *Controller) createAddressSet(name string, hashName string,
 	// An addressSet has already been created. Just set addresses.
 	if addressSet != "" {
 		// Set the addresses
-		_, stderr, err = util.RunOVNNbctlUnix("set", "address_set",
+		_, stderr, err = util.RunOVNNbctlHA("set", "address_set",
 			hashName, fmt.Sprintf("addresses=%s", ips))
 		if err != nil {
 			logrus.Errorf("failed to set address_set, stderr: %q (%v)",
@@ -110,11 +120,11 @@ func (oc *Controller) createAddressSet(name string, hashName string,
 
 	// addressSet has not been created yet. Create it.
 	if len(addresses) == 0 {
-		_, stderr, err = util.RunOVNNbctlUnix("create", "address_set",
+		_, stderr, err = util.RunOVNNbctlHA("create", "address_set",
 			fmt.Sprintf("name=%s", hashName),
 			fmt.Sprintf("external-ids:name=%s", name))
 	} else {
-		_, stderr, err = util.RunOVNNbctlUnix("create", "address_set",
+		_, stderr, err = util.RunOVNNbctlHA("create", "address_set",
 			fmt.Sprintf("name=%s", hashName),
 			fmt.Sprintf("external-ids:name=%s", name),
 			fmt.Sprintf("addresses=%s", ips))
@@ -128,10 +138,61 @@ func (oc *Controller) createAddressSet(name string, hashName string,
 func (oc *Controller) deleteAddressSet(hashName string) {
 	logrus.Debugf("deleteAddressSet %s", hashName)
 
-	_, stderr, err := util.RunOVNNbctlUnix("--if-exists", "destroy",
+	_, stderr, err := util.RunOVNNbctlHA("--if-exists", "destroy",
 		"address_set", hashName)
 	if err != nil {
 		logrus.Errorf("failed to destroy address set %s, stderr: %q, (%v)",
+			hashName, stderr, err)
+		return
+	}
+}
+
+func (oc *Controller) createPortGroup(name string,
+	hashName string) (string, error) {
+	logrus.Debugf("createPortGroup with %s", name)
+	portGroup, stderr, err := util.RunOVNNbctlHA("--data=bare",
+		"--no-heading", "--columns=_uuid", "find", "port_group",
+		fmt.Sprintf("name=%s", hashName))
+	if err != nil {
+		return "", fmt.Errorf("find failed to get port_group, stderr: %q (%v)",
+			stderr, err)
+	}
+
+	if portGroup != "" {
+		return portGroup, nil
+	}
+
+	portGroup, stderr, err = util.RunOVNNbctlHA("create", "port_group",
+		fmt.Sprintf("name=%s", hashName),
+		fmt.Sprintf("external-ids:name=%s", name))
+	if err != nil {
+		return "", fmt.Errorf("failed to create port_group %s, "+
+			"stderr: %q (%v)", name, stderr, err)
+	}
+
+	return portGroup, nil
+}
+
+func (oc *Controller) deletePortGroup(hashName string) {
+	logrus.Debugf("deletePortGroup %s", hashName)
+
+	portGroup, stderr, err := util.RunOVNNbctlHA("--data=bare",
+		"--no-heading", "--columns=_uuid", "find", "port_group",
+		fmt.Sprintf("name=%s", hashName))
+	if err != nil {
+		logrus.Errorf("find failed to get port_group, stderr: %q (%v)",
+			stderr, err)
+		return
+	}
+
+	if portGroup == "" {
+		return
+	}
+
+	_, stderr, err = util.RunOVNNbctlHA("--if-exists", "destroy",
+		"port_group", portGroup)
+	if err != nil {
+		logrus.Errorf("failed to destroy port_group %s, stderr: %q, (%v)",
 			hashName, stderr, err)
 		return
 	}

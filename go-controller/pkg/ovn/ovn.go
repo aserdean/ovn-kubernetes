@@ -3,6 +3,7 @@ package ovn
 import (
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/kube"
+	util "github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/sirupsen/logrus"
 	kapi "k8s.io/api/core/v1"
 	kapisnetworking "k8s.io/api/networking/v1"
@@ -24,12 +25,19 @@ type Controller struct {
 	// cluster's east-west traffic.
 	loadbalancerClusterCache map[string]string
 
+	// For TCP and UDP type traffice, cache OVN load balancer that exists on the
+	// default gateway
+	loadbalancerGWCache map[string]string
+
 	// A cache of all logical switches seen by the watcher
 	logicalSwitchCache map[string]bool
 
 	// A cache of all logical ports seen by the watcher and
 	// its corresponding logical switch
 	logicalPortCache map[string]string
+
+	// A cache of all logical ports and its corresponding uuids.
+	logicalPortUUIDCache map[string]string
 
 	// For each namespace, an address_set that has all the pod IP
 	// address in that namespace
@@ -41,6 +49,12 @@ type Controller struct {
 	// For each namespace, a map of policy name to 'namespacePolicy'.
 	namespacePolicies map[string]map[string]*namespacePolicy
 
+	// Port group for ingress deny rule
+	portGroupIngressDeny string
+
+	// Port group for egress deny rule
+	portGroupEgressDeny string
+
 	// For each logical port, the number of network policies that want
 	// to add a ingress deny rule.
 	lspIngressDenyCache map[string]int
@@ -49,8 +63,11 @@ type Controller struct {
 	// to add a egress deny rule.
 	lspEgressDenyCache map[string]int
 
-	// A mutex for logicalPortIngressDenyCache
+	// A mutex for lspIngressDenyCache and lspEgressDenyCache
 	lspMutex *sync.Mutex
+
+	// supports port_group?
+	portGroupSupport bool
 }
 
 const (
@@ -69,6 +86,7 @@ func NewOvnController(kubeClient kubernetes.Interface, wf *factory.WatchFactory,
 		watchFactory:             wf,
 		logicalSwitchCache:       make(map[string]bool),
 		logicalPortCache:         make(map[string]string),
+		logicalPortUUIDCache:     make(map[string]string),
 		namespaceAddressSet:      make(map[string]map[string]bool),
 		namespacePolicies:        make(map[string]map[string]*namespacePolicy),
 		namespaceMutex:           make(map[string]*sync.Mutex),
@@ -77,12 +95,19 @@ func NewOvnController(kubeClient kubernetes.Interface, wf *factory.WatchFactory,
 		lspMutex:                 &sync.Mutex{},
 		gatewayCache:             make(map[string]string),
 		loadbalancerClusterCache: make(map[string]string),
+		loadbalancerGWCache:      make(map[string]string),
 		nodePortEnable:           nodePortEnable,
 	}
 }
 
 // Run starts the actual watching. Also initializes any local structures needed.
 func (oc *Controller) Run() error {
+	_, _, err := util.RunOVNNbctlHA("--columns=_uuid", "list",
+		"port_group")
+	if err == nil {
+		oc.portGroupSupport = true
+	}
+
 	for _, f := range []func() error{oc.WatchPods, oc.WatchServices, oc.WatchEndpoints, oc.WatchNamespaces, oc.WatchNetworkPolicy} {
 		if err := f(); err != nil {
 			return err

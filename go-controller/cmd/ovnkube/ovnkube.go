@@ -17,6 +17,8 @@ import (
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ovn"
 	util "github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
+
+	kexec "k8s.io/utils/exec"
 )
 
 func main() {
@@ -90,7 +92,11 @@ func main() {
 				"exclusively used for the OVN gateway.  When true, only OVN" +
 				"related traffic can flow through this interface",
 		},
-
+		cli.BoolFlag{
+			Name: "gateway-localnet",
+			Usage: "If true, creates a localnet gateway to let traffic reach " +
+				"host network and also exit host with iptables NAT",
+		},
 		cli.BoolFlag{
 			Name:  "nodeport",
 			Usage: "Setup nodeport based ingress on gateways.",
@@ -121,7 +127,8 @@ func delPidfile(pidfile string) {
 }
 
 func runOvnKube(ctx *cli.Context) error {
-	configFilePath, err := config.InitConfig(ctx, nil)
+	exec := kexec.New()
+	_, err := config.InitConfig(ctx, exec, nil)
 	if err != nil {
 		return err
 	}
@@ -166,6 +173,11 @@ func runOvnKube(ctx *cli.Context) error {
 		}
 	}
 
+	if err = util.SetExec(exec); err != nil {
+		logrus.Errorf("Failed to initialize exec helper: %v", err)
+		return err
+	}
+
 	nodeToRemove := ctx.String("remove-node")
 	if nodeToRemove != "" {
 		err = util.RemoveNode(nodeToRemove)
@@ -199,6 +211,7 @@ func runOvnKube(ctx *cli.Context) error {
 		clusterController.GatewayIntf = ctx.String("gateway-interface")
 		clusterController.GatewayNextHop = ctx.String("gateway-nexthop")
 		clusterController.GatewaySpareIntf = ctx.Bool("gateway-spare-interface")
+		clusterController.LocalnetGateway = ctx.Bool("gateway-localnet")
 		clusterController.OvnHA = ctx.Bool("ha")
 		_, clusterController.ClusterIPNet, err = net.ParseCIDR(ctx.String("cluster-subnet"))
 		if err != nil {
@@ -234,7 +247,7 @@ func runOvnKube(ctx *cli.Context) error {
 				panic("Cannot initialize node without service account 'token'. Please provide one with --k8s-token argument")
 			}
 
-			err := clusterController.StartClusterNode(node, configFilePath)
+			err := clusterController.StartClusterNode(node)
 			if err != nil {
 				logrus.Errorf(err.Error())
 				panic(err.Error())
@@ -259,7 +272,7 @@ func runOvnKube(ctx *cli.Context) error {
 		// run forever
 		select {}
 	}
-	if node != "" && (nodePortEnable || clusterController.OvnHA) {
+	if node != "" {
 		// run forever
 		select {}
 	}

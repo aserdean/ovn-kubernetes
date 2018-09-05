@@ -5,6 +5,7 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
@@ -19,28 +20,18 @@ const (
 func configureManagementPortWindows(clusterSubnet, clusterServicesSubnet,
 	routerIP, interfaceName, interfaceIP string) error {
 	// Up the interface.
-	args := []string{"Enable-NetAdapter", fmt.Sprintf("%s", interfaceName)}
-	logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-	_, err := exec.Command("powershell", args...).CombinedOutput()
+	_, _, err := util.RunPowershell("Enable-NetAdapter", "-IncludeHidden", interfaceName)
 	if err != nil {
 		return err
 	}
 
 	//check if interface already exists
-	args = []string{"Get-NetIPAddress", fmt.Sprintf("-InterfaceAlias %s", interfaceName)}
-	logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-	_, err = exec.Command("powershell", args...).CombinedOutput()
+	ifAlias := fmt.Sprintf("-InterfaceAlias %s", interfaceName)
+	_, _, err = util.RunPowershell("Get-NetIPAddress", ifAlias)
 	if err == nil {
 		//The interface already exists, we should delete the routes and IP
 		logrus.Debugf("Interface %s exists, removing.", interfaceName)
-		args = []string{"Remove-NetIPAddress",
-			fmt.Sprintf("-InterfaceAlias %s", interfaceName),
-			"-Confirm:$false"}
-		logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-		_, err = exec.Command("powershell", args...).CombinedOutput()
+		_, _, err = util.RunPowershell("Remove-NetIPAddress", ifAlias, "-Confirm:$false")
 		if err != nil {
 			return err
 		}
@@ -52,62 +43,56 @@ func configureManagementPortWindows(clusterSubnet, clusterServicesSubnet,
 		return fmt.Errorf("Failed to parse interfaceIP %v : %v", interfaceIP, err)
 	}
 	portPrefix, _ := interfaceIPNet.Mask.Size()
-	args = []string{"New-NetIPAddress",
+	_, _, err = util.RunPowershell("New-NetIPAddress",
 		fmt.Sprintf("-IPAddress %s", portIP),
 		fmt.Sprintf("-PrefixLength %d", portPrefix),
-		fmt.Sprintf("-InterfaceAlias %s", interfaceName)}
-	logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-	_, err = exec.Command("powershell", args...).CombinedOutput()
+		ifAlias)
 	if err != nil {
 		return err
 	}
 
 	// Set MTU for the interface
-	args = []string{"interface", "ipv4", "set", "subinterface",
-		fmt.Sprintf("%s", interfaceName), fmt.Sprintf("mtu=%d", config.Default.MTU), "store=persistent"}
-	logrus.Debugf("Executing 'netsh %s'", strings.Join(args, " "))
-
-	_, err = exec.Command("netsh", args...).CombinedOutput()
+	_, _, err = util.RunNetsh("interface", "ipv4", "set", "subinterface",
+		interfaceName, fmt.Sprintf("mtu=%d", config.Default.MTU),
+		"store=persistent")
 	if err != nil {
 		return err
 	}
+
+	// Retrieve the interface index
+	stdout, stderr, err := util.RunPowershell("$(Get-NetAdapter", "-IncludeHidden", "|", "Where",
+		"{", "$_.Name", "-Match", fmt.Sprintf("\"%s\"", interfaceName), "}).ifIndex")
+	if err != nil {
+		logrus.Errorf("Failed to fetch interface index, stderr: %q, error: %v", stderr, err)
+		return err
+	}
+	if _, err := strconv.Atoi(stdout); err != nil {
+		logrus.Errorf("Failed to parse interface index %q: %v", stdout, err)
+		return err
+	}
+	interfaceIndex := stdout
 
 	clusterIP, clusterIPNet, err := net.ParseCIDR(clusterSubnet)
 	if err != nil {
 		return fmt.Errorf("Failed to parse clusterSubnet %v : %v", clusterSubnet, err)
 	}
 	// Checking if the route already exists, in which case it will not be created again
-	stdoutStderr, err := exec.Command("route", "print", "-4", fmt.Sprintf("%s", clusterIP)).CombinedOutput()
+	stdout, stderr, err = util.RunRoute("print", "-4", clusterIP.String())
 	if err != nil {
-		logrus.Debugf("Failed to run route print, stderr: %q, error: %v", stdoutStderr, err)
+		logrus.Debugf("Failed to run route print, stderr: %q, error: %v", stderr, err)
 	}
 
-	var interfaceIndex string
-	if strings.Contains(fmt.Sprintf("%s", stdoutStderr), fmt.Sprintf("%s", clusterIP)) {
+	if strings.Contains(stdout, clusterIP.String()) {
 		logrus.Debugf("Route was found, skipping route add")
 	} else {
-		args = []string{"$(Get-NetAdapter", "|", "Where",
-			"{", "$_.Name", "-Match", fmt.Sprintf("\"%s\"", interfaceName), "}).ifIndex"}
-		logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-		stdoutStderr, err := exec.Command("powershell", args...).CombinedOutput()
-		if err != nil {
-			logrus.Errorf("Failed to fetch interface index, stderr: %q, error: %v", stdoutStderr, err)
-			return err
-		}
-		interfaceIndex = strings.TrimSpace(fmt.Sprintf("%s", stdoutStderr))
 		// Windows route command requires the mask to be specified in the IP format
-		clusterMask := fmt.Sprintf("%s", net.IP(clusterIPNet.Mask))
+		clusterMask := net.IP(clusterIPNet.Mask).String()
 		// Create a route for the entire subnet.
-		args = []string{"route", "-p", "add",
-			fmt.Sprintf("%s", clusterIP), "mask", fmt.Sprintf("%s", clusterMask),
-			fmt.Sprintf("%s", routerIP), "METRIC", "2", "IF", fmt.Sprintf("%s", interfaceIndex)}
-		logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-		stdoutStderr, err = exec.Command("powershell", args...).CombinedOutput()
+		_, stderr, err = util.RunRoute("-p", "add",
+			clusterIP.String(), "mask", clusterMask,
+			routerIP, "METRIC", "2", "IF", interfaceIndex)
 		if err != nil {
-			logrus.Errorf("failed to run route add, stderr: %q, error: %v", fmt.Sprintf("%s", stdoutStderr), err)
+			logrus.Errorf("failed to run route add, stderr: %q, error: %v", stderr, err)
 			return err
 		}
 	}
@@ -118,25 +103,22 @@ func configureManagementPortWindows(clusterSubnet, clusterServicesSubnet,
 			return fmt.Errorf("Failed to parse clusterServicesSubnet %v : %v", clusterServicesSubnet, err)
 		}
 		// Checking if the route already exists, in which case it will not be created again
-		stdoutStderr, err := exec.Command("route", "print", "-4", fmt.Sprintf("%s", clusterServiceIP)).CombinedOutput()
+		stdout, stderr, err = util.RunRoute("print", "-4", clusterServiceIP.String())
 		if err != nil {
-			logrus.Debugf("Failed to run route print, stderr: %q, error: %v", stdoutStderr, err)
+			logrus.Debugf("Failed to run route print, stderr: %q, error: %v", stderr, err)
 		}
 
-		if strings.Contains(fmt.Sprintf("%s", stdoutStderr), fmt.Sprintf("%s", clusterServiceIP)) {
+		if strings.Contains(stdout, clusterServiceIP.String()) {
 			logrus.Debugf("Route was found, skipping route add")
 		} else {
 			// Windows route command requires the mask to be specified in the IP format
-			clusterServiceMask := fmt.Sprintf("%s", net.IP(clusterServiceIPNet.Mask))
+			clusterServiceMask := net.IP(clusterServiceIPNet.Mask).String()
 			// Create a route for the entire subnet.
-			args = []string{"route", "-p", "add",
-				fmt.Sprintf("%s", clusterServiceIP), "mask", fmt.Sprintf("%s", clusterServiceMask),
-				fmt.Sprintf("%s", routerIP), "METRIC", "2", "IF", fmt.Sprintf("%s", interfaceIndex)}
-			logrus.Debugf("Executing 'powershell %s'", strings.Join(args, " "))
-
-			stdoutStderr, err = exec.Command("powershell", args...).CombinedOutput()
+			_, stderr, err = util.RunRoute("-p", "add",
+				clusterServiceIP.String(), "mask", clusterServiceMask,
+				routerIP, "METRIC", "2", "IF", interfaceIndex)
 			if err != nil {
-				logrus.Errorf("failed to run route add, stderr: %q, error: %v", fmt.Sprintf("%s", stdoutStderr), err)
+				logrus.Errorf("failed to run route add, stderr: %q, error: %v", stderr, err)
 				return err
 			}
 		}
@@ -155,46 +137,45 @@ func configureManagementPort(clusterSubnet, clusterServicesSubnet,
 	}
 
 	// Up the interface.
-	_, err := exec.Command("ip", "link", "set", interfaceName, "up").CombinedOutput()
+	_, _, err := util.RunIP("link", "set", interfaceName, "up")
 	if err != nil {
 		return err
 	}
 
 	// The interface may already exist, in which case delete the routes and IP.
-	_, err = exec.Command("ip", "addr", "flush", "dev", interfaceName).CombinedOutput()
+	_, _, err = util.RunIP("addr", "flush", "dev", interfaceName)
 	if err != nil {
 		return err
 	}
 
 	// Assign IP address to the internal interface.
-	_, err = exec.Command("ip", "addr", "add", interfaceIP, "dev", interfaceName).CombinedOutput()
+	_, _, err = util.RunIP("addr", "add", interfaceIP, "dev", interfaceName)
 	if err != nil {
 		return err
 	}
 
 	// Flush the route for the entire subnet (in case it was added before).
-	_, err = exec.Command("ip", "route", "flush", clusterSubnet).CombinedOutput()
+	_, _, err = util.RunIP("route", "flush", clusterSubnet)
 	if err != nil {
 		return err
 	}
 
 	// Create a route for the entire subnet.
-	_, err = exec.Command("ip", "route", "add", clusterSubnet, "via", routerIP).CombinedOutput()
+	_, _, err = util.RunIP("route", "add", clusterSubnet, "via", routerIP)
 	if err != nil {
 		return err
 	}
 
 	if clusterServicesSubnet != "" {
 		// Flush the route for the services subnet (in case it was added before).
-		_, err = exec.Command("ip", "route", "flush",
-			clusterServicesSubnet).CombinedOutput()
+		_, _, err = util.RunIP("route", "flush", clusterServicesSubnet)
 		if err != nil {
 			return err
 		}
 
 		// Create a route for the services subnet.
-		_, err = exec.Command("ip", "route", "add", clusterServicesSubnet,
-			"via", routerIP).CombinedOutput()
+		_, _, err = util.RunIP("route", "add", clusterServicesSubnet,
+			"via", routerIP)
 		if err != nil {
 			return err
 		}
@@ -299,7 +280,7 @@ func CreateManagementPort(nodeName, localSubnet, clusterSubnet,
 
 	if runtime.GOOS == windowsOS && macAddress == "00:00:00:00:00:00" {
 		var stdoutStderr []byte
-		stdoutStderr, err = exec.Command("powershell", "$(Get-NetAdapter", "|", "Where", "{", "$_.Name",
+		stdoutStderr, err = exec.Command("powershell", "$(Get-NetAdapter", "-IncludeHidden", "|", "Where", "{", "$_.Name",
 			"-Match", fmt.Sprintf("\"%s\"", interfaceName), "}).MacAddress").CombinedOutput()
 		if err != nil {
 			logrus.Errorf("Failed to get mac address of ovn-k8s-master, stderr: %q, error: %v", fmt.Sprintf("%s", stdoutStderr), err)

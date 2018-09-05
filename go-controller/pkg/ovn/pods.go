@@ -24,7 +24,7 @@ func (oc *Controller) syncPods(pods []interface{}) {
 	}
 
 	// get the list of logical ports from OVN
-	output, stderr, err := util.RunOVNNbctlUnix("--data=bare", "--no-heading",
+	output, stderr, err := util.RunOVNNbctlHA("--data=bare", "--no-heading",
 		"--columns=name", "find", "logical_switch_port", "external_ids:pod=true")
 	if err != nil {
 		logrus.Errorf("Error in obtaining list of logical ports, "+
@@ -37,21 +37,23 @@ func (oc *Controller) syncPods(pods []interface{}) {
 		if _, ok := expectedLogicalPorts[existingPort]; !ok {
 			// not found, delete this logical port
 			logrus.Infof("Stale logical port found: %s. This logical port will be deleted.", existingPort)
-			out, stderr, err := util.RunOVNNbctlUnix("--if-exists", "lsp-del",
+			out, stderr, err := util.RunOVNNbctlHA("--if-exists", "lsp-del",
 				existingPort)
 			if err != nil {
 				logrus.Errorf("Error in deleting pod's logical port "+
 					"stdout: %q, stderr: %q err: %v",
 					out, stderr, err)
 			}
-			oc.deletePodAcls(existingPort)
+			if !oc.portGroupSupport {
+				oc.deletePodAcls(existingPort)
+			}
 		}
 	}
 }
 
 func (oc *Controller) deletePodAcls(logicalPort string) {
 	// delete the ACL rules on OVN that corresponding pod has been deleted
-	uuids, stderr, err := util.RunOVNNbctlUnix("--data=bare", "--no-heading",
+	uuids, stderr, err := util.RunOVNNbctlHA("--data=bare", "--no-heading",
 		"--columns=_uuid", "find", "ACL",
 		fmt.Sprintf("external_ids:logical_port=%s", logicalPort))
 	if err != nil {
@@ -69,7 +71,7 @@ func (oc *Controller) deletePodAcls(logicalPort string) {
 	uuidSlice := strings.Fields(uuids)
 	for _, uuid := range uuidSlice {
 		// Get logical switch
-		out, stderr, err := util.RunOVNNbctlUnix("--data=bare",
+		out, stderr, err := util.RunOVNNbctlHA("--data=bare",
 			"--no-heading", "--columns=_uuid", "find", "logical_switch",
 			fmt.Sprintf("acls{>=}%s", uuid))
 		if err != nil {
@@ -83,8 +85,8 @@ func (oc *Controller) deletePodAcls(logicalPort string) {
 		}
 		logicalSwitch := out
 
-		_, stderr, err = util.RunOVNNbctlUnix("remove", "logical_switch",
-			logicalSwitch, "acls", uuid)
+		_, stderr, err = util.RunOVNNbctlHA("--if-exists", "remove",
+			"logical_switch", logicalSwitch, "acls", uuid)
 		if err != nil {
 			logrus.Errorf("failed to delete the allow-from rule %s for"+
 				" logical_switch=%s, logical_port=%s, stderr: %q, (%v)",
@@ -94,12 +96,33 @@ func (oc *Controller) deletePodAcls(logicalPort string) {
 	}
 }
 
+func (oc *Controller) getLogicalPortUUID(logicalPort string) string {
+	if oc.logicalPortUUIDCache[logicalPort] != "" {
+		return oc.logicalPortUUIDCache[logicalPort]
+	}
+
+	out, stderr, err := util.RunOVNNbctlHA("--if-exists", "get",
+		"logical_switch_port", logicalPort, "_uuid")
+	if err != nil {
+		logrus.Errorf("Error while getting uuid for logical_switch_port "+
+			"%s, stderr: %q, err: %v", logicalPort, stderr, err)
+		return ""
+	}
+
+	if out == "" {
+		return out
+	}
+
+	oc.logicalPortUUIDCache[logicalPort] = out
+	return oc.logicalPortUUIDCache[logicalPort]
+}
+
 func (oc *Controller) getGatewayFromSwitch(logicalSwitch string) (string, string, error) {
 	var gatewayIPMaskStr, stderr string
 	var ok bool
 	var err error
 	if gatewayIPMaskStr, ok = oc.gatewayCache[logicalSwitch]; !ok {
-		gatewayIPMaskStr, stderr, err = util.RunOVNNbctlUnix("--if-exists",
+		gatewayIPMaskStr, stderr, err = util.RunOVNNbctlHA("--if-exists",
 			"get", "logical_switch", logicalSwitch,
 			"external_ids:gateway_ip")
 		if err != nil {
@@ -127,7 +150,7 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) {
 
 	logrus.Infof("Deleting pod: %s", pod.Name)
 	logicalPort := fmt.Sprintf("%s_%s", pod.Namespace, pod.Name)
-	out, stderr, err := util.RunOVNNbctlUnix("--if-exists", "lsp-del",
+	out, stderr, err := util.RunOVNNbctlHA("--if-exists", "lsp-del",
 		logicalPort)
 	if err != nil {
 		logrus.Errorf("Error in deleting pod logical port "+
@@ -142,10 +165,15 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) {
 	oc.lspMutex.Lock()
 	delete(oc.lspIngressDenyCache, logicalPort)
 	delete(oc.lspEgressDenyCache, logicalPort)
+	delete(oc.logicalPortUUIDCache, logicalPort)
 	oc.lspMutex.Unlock()
 
-	oc.deleteACLDeny(pod.Namespace, pod.Spec.NodeName, logicalPort, "Ingress")
-	oc.deleteACLDeny(pod.Namespace, pod.Spec.NodeName, logicalPort, "Egress")
+	if !oc.portGroupSupport {
+		oc.deleteACLDenyOld(pod.Namespace, pod.Spec.NodeName, logicalPort,
+			"Ingress")
+		oc.deleteACLDenyOld(pod.Namespace, pod.Spec.NodeName, logicalPort,
+			"Egress")
+	}
 	oc.deletePodFromNamespaceAddressSet(pod.Namespace, ipAddress)
 	return
 }
@@ -180,9 +208,10 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) {
 		ipAddress := oc.getIPFromOvnAnnotation(annotation)
 		macAddress := oc.getMacFromOvnAnnotation(annotation)
 
-		out, stderr, err = util.RunOVNNbctlUnix("--may-exist", "lsp-add",
+		out, stderr, err = util.RunOVNNbctlHA("--may-exist", "lsp-add",
 			logicalSwitch, portName, "--", "lsp-set-addresses", portName,
-			fmt.Sprintf("%s %s", macAddress, ipAddress))
+			fmt.Sprintf("%s %s", macAddress, ipAddress), "--", "--if-exists",
+			"clear", "logical_switch_port", portName, "dynamic_addresses")
 		if err != nil {
 			logrus.Errorf("Failed to add logical port to switch "+
 				"stdout: %q, stderr: %q (%v)",
@@ -190,7 +219,7 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) {
 			return
 		}
 	} else {
-		out, stderr, err = util.RunOVNNbctlUnix("--wait=sb", "--",
+		out, stderr, err = util.RunOVNNbctlHA("--wait=sb", "--",
 			"--may-exist", "lsp-add", logicalSwitch, portName,
 			"--", "lsp-set-addresses",
 			portName, "dynamic", "--", "set",
@@ -217,10 +246,10 @@ func (oc *Controller) addLogicalPort(pod *kapi.Pod) {
 	count := 30
 	for count > 0 {
 		if isStaticIP {
-			out, stderr, err = util.RunOVNNbctlUnix("get",
+			out, stderr, err = util.RunOVNNbctlHA("get",
 				"logical_switch_port", portName, "addresses")
 		} else {
-			out, stderr, err = util.RunOVNNbctlUnix("get",
+			out, stderr, err = util.RunOVNNbctlHA("get",
 				"logical_switch_port", portName, "dynamic_addresses")
 		}
 		if err == nil && out != "[]" {
@@ -284,7 +313,7 @@ func (oc *Controller) AddLogicalPortWithIP(pod *kapi.Pod) {
 	ipAddress := oc.getIPFromOvnAnnotation(annotation)
 	macAddress := oc.getMacFromOvnAnnotation(annotation)
 
-	stdout, stderr, err := util.RunOVNNbctlUnix("--", "--may-exist", "lsp-add",
+	stdout, stderr, err := util.RunOVNNbctlHA("--", "--may-exist", "lsp-add",
 		logicalSwitch, portName, "--", "lsp-set-addresses", portName,
 		fmt.Sprintf("%s %s", macAddress, ipAddress))
 	if err != nil {

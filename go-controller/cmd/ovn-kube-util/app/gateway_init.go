@@ -6,6 +6,8 @@ import (
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/urfave/cli"
+
+	kexec "k8s.io/utils/exec"
 )
 
 // InitGatewayCmd initializes k8s gateway node.
@@ -55,8 +57,12 @@ var InitGatewayCmd = cli.Command{
 }
 
 func initGateway(context *cli.Context) error {
-	logrus.Errorf("Test1")
-	if _, err := config.InitConfig(context, &config.Defaults{OvnNorthAddress: true}); err != nil {
+	exec := kexec.New()
+	if err := util.SetExec(exec); err != nil {
+		return err
+	}
+
+	if _, err := config.InitConfig(context, exec, &config.Defaults{OvnNorthAddress: true}); err != nil {
 		return err
 	}
 

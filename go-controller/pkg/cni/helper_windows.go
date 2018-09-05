@@ -1,6 +1,6 @@
 // +build windows
 
-package app
+package cni
 
 import (
 	"encoding/json"
@@ -12,7 +12,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/Microsoft/hcsshim"
-	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types/current"
 
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
@@ -110,7 +109,8 @@ func deleteHNSEndpoint(endpointName string) error {
 // The fact that CNI add should be idempotent on Windows is stated here:
 // https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/network/cni/cni_windows.go#L38
 // TODO: add proper MTU config (GetCurrentThreadId/SetCurrentThreadId) or via OVS properties
-func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, macAddress string, ipAddress string, gatewayIP string, mtu int) ([]*current.Interface, error) {
+func (pr *PodRequest) ConfigureInterface(namespace string, podName string, macAddress string, ipAddress string, gatewayIP string, mtu int, ingress, egress int64) ([]*current.Interface, error) {
+	conf := pr.CNIConf
 	ipAddr, ipNet, err := net.ParseCIDR(ipAddress)
 	if err != nil {
 		return nil, err
@@ -121,6 +121,16 @@ func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, ma
 	// even for containers that are not the infra container.
 	// This is getting fixed by https://github.com/kubernetes/kubernetes/pull/64189
 	endpointName := fmt.Sprintf("%s_%s", namespace, podName)
+
+	defer func() {
+		// Delete the endpoint in case CNI fails
+		if err != nil {
+			errHNSDelete := deleteHNSEndpoint(endpointName)
+			if errHNSDelete != nil {
+				logrus.Warningf("Failed to delete the HNS Endpoint, reason: %q", errHNSDelete)
+			}
+		}
+	}()
 
 	var hnsNetworkId string
 	hnsNetworkId, err = getHNSIdFromConfigOrByGatewayIP(gatewayIP)
@@ -145,6 +155,8 @@ func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, ma
 			IPAddress:      ipAddr,
 			MacAddress:     macAddressIpFormat,
 			PrefixLength:   uint8(ipMaskSize),
+			DNSServerList:  strings.Join(conf.DNS.Nameservers, ","),
+			DNSSuffix:      strings.Join(conf.DNS.Search, ","),
 		}
 		createdEndpoint, err = createHNSEndpoint(hnsEndpoint)
 		if err != nil {
@@ -154,14 +166,9 @@ func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, ma
 		logrus.Infof("HNS endpoint already exists with name: %q", endpointName)
 	}
 
-	err = containerHotAttachEndpoint(createdEndpoint, args.ContainerID)
+	err = containerHotAttachEndpoint(createdEndpoint, pr.SandboxID)
 	if err != nil {
-		logrus.Warningf("Failed to hot attach HNS Endpoint %q to container %q, reason: %q", endpointName, args.ContainerID, err)
-		// In case the attach failed, delete the endpoint
-		errHNSDelete := deleteHNSEndpoint(args.ContainerID)
-		if errHNSDelete != nil {
-			logrus.Warningf("Failed to delete the HNS Endpoint, reason: %q", errHNSDelete)
-		}
+		logrus.Warningf("Failed to hot attach HNS Endpoint %q to container %q, reason: %q", endpointName, pr.SandboxID, err)
 		return nil, err
 	}
 
@@ -189,25 +196,30 @@ func ConfigureInterface(args *skel.CmdArgs, namespace string, podName string, ma
 		fmt.Sprintf("-NlMtuBytes %d", mtu),
 	}
 
-	_, err = exec.Command("powershell", mtuArgs...).CombinedOutput()
+	out, err = exec.Command("powershell", mtuArgs...).CombinedOutput()
 	if err != nil {
-		logrus.Warningf("Failed to set MTU on endpoint, reason: %q", err)
+		logrus.Warningf("Failed to set MTU on endpoint %q, with: %q", endpointName, string(out))
+		return nil, fmt.Errorf("failed to set MTU on endpoint, reason: %q", err)
 	}
+
+	// TODO: uncomment when OVS QoS is supported on Windows
+	//if err = clearPodBandwidth(args.ContainerID); err != nil {
+	//	return nil, err
+	//}
+	//if err = setPodBandwidth(args.ContainerID, endpointName, ingress, egress); err != nil {
+	//	return nil, err
+	//}
 
 	return []*current.Interface{}, nil
 }
 
 // PlatformSpecificCleanup deletes the OVS port and also the corresponding
 // HNS Endpoint for the OVS port.
-func PlatformSpecificCleanup(args *skel.CmdArgs, argsMap map[string]string) error {
-	if argsMap == nil {
-		logrus.Warningf("cleanup failed, invalid args passed: %v", args.Args)
-		return nil
-	}
-	namespace := argsMap["K8S_POD_NAMESPACE"]
-	podName := argsMap["K8S_POD_NAME"]
+func (pr *PodRequest) PlatformSpecificCleanup() error {
+	namespace := pr.PodNamespace
+	podName := pr.PodName
 	if namespace == "" || podName == "" {
-		logrus.Warningf("cleanup failed, required CNI variable missing from args: %v", args.Args)
+		logrus.Warningf("cleanup failed, required CNI variable missing from args: %v", pr)
 		return nil
 	}
 
@@ -223,5 +235,7 @@ func PlatformSpecificCleanup(args *skel.CmdArgs, argsMap map[string]string) erro
 	if err = deleteHNSEndpoint(endpointName); err != nil {
 		logrus.Warningf("failed to delete HNSEndpoint %v: %v", endpointName, err)
 	}
+	// TODO: uncomment when OVS QoS is supported on Windows
+	// _ = clearPodBandwidth(args.ContainerID)
 	return nil
 }

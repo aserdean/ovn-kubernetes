@@ -18,16 +18,34 @@ installations.  If you use packages to install OVS, you should install both
 OVS and OVN related packages.  You can also read the following quick-start
 guide for Ubuntu that installs OVS and OVN from source and packages:
 [INSTALL.UBUNTU.md]
+The following guide explains setting up an OVN overlay network on Openshift
+running on RHEL/Centos/Fedora: [INSTALL.OPENSHIFT.md](docs/INSTALL.OPENSHIFT.md)
 
 On each node, you should also install the 'ovnkube' utility that comes with
-this repository. To install it, you can run:
+this repository. To compile it, you will need golang installed.  You can
+install golang with:
 
 ```
+wget -nv https://dl.google.com/go/go1.9.2.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.9.2.linux-amd64.tar.gz
+```
+
+You need to set your GOPATH, clone the ovn-kubernetes repo, compile and
+install it.
+
+```
+export GOPATH=$HOME/work
+mkdir -p $GOPATH/github.com/openvswitch
+cd $GOPATH/github.com/openvswitch
 git clone https://github.com/openvswitch/ovn-kubernetes
-cd go-controller
+cd ovn-kubernetes/go-controller
 make
 sudo make install
 ```
+
+Note that, you need not do the above compilation on every host. You can copy
+over the compiled binaries to other hosts.  We will have the option to run
+OVN via kubernetes daemonsets soon.
 
 ### Kubernetes networking requirements:
 
@@ -68,7 +86,7 @@ in the master node.
 OVN architecture has a central component which stores your networking intent
 in a database.  Start this central component on one of the nodes where you
 have started your k8s central daemons and which has an IP address of
-$CENTRAL_IP.
+$CENTRAL_IP.  (For HA of the central component, please read [HA.md])
 
 Start ovn-northd daemon.  This daemon translates networking intent from k8s
 stored in the OVN_Northbound database to logical flows in OVN_Southbound
@@ -106,6 +124,7 @@ uses the hostname.  kubelet allows this name to be overridden with
  -cluster-subnet="$CLUSTER_IP_SUBNET" \
  -service-cluster-ip-range=$SERVICE_IP_SUBNET \
  -nodeport \
+ -init-gateways -gateway-localnet \
  -k8s-token="$TOKEN" \
  -nb-address="tcp://$CENTRAL_IP:6641" \
  -sb-address="tcp://$CENTRAL_IP:6642" 2>&1 &
@@ -224,3 +243,4 @@ does install kubernetes in its simplest form.
 [vagrant]: vagrant/README.md
 [INSTALL.SSL.md]: docs/INSTALL.SSL.md
 [config.md]: docs/config.md
+[HA.md]: docs/ha.md
