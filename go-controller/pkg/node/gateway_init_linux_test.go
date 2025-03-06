@@ -783,6 +783,7 @@ func shareGatewayInterfaceDPUHostTest(app *cli.App, testNS ns.NetNS, uplinkName,
 		}
 
 		stop := make(chan struct{})
+		errChan := make(chan error)
 		wf, err := factory.NewNodeWatchFactory(fakeClient, nodeName)
 		Expect(err).NotTo(HaveOccurred())
 		wg := &sync.WaitGroup{}

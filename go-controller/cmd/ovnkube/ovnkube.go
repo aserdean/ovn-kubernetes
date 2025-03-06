@@ -435,6 +435,7 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 	// there might be dependencies across components when starting so run them
 	// in separate threads
 	wg := &sync.WaitGroup{}
+	errChan := make(chan error)
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithCancel(ctx)
 	var managerErr, controllerErr, nodeErr error
@@ -536,7 +537,8 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 				runMode.identity,
 				wg,
 				eventRecorder,
-				routemanager.NewController())
+				routemanager.NewController(),
+				errChan)
 			if err != nil {
 				nodeErr = fmt.Errorf("failed to create node network controller: %w", err)
 				return
@@ -568,7 +570,18 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 	}
 
 	// run until cancelled
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+		err := <-errChan
+		if err != nil {
+			return fmt.Errorf("error received from channel: %w", err)
+		}
+	case err := <-errChan:
+		if err != nil {
+			return fmt.Errorf("error received from channel: %w", err)
+		}
+	}
+
 	klog.Infof("Stopping ovnkube...")
 	cancel()
 	watchFactory.Shutdown()
