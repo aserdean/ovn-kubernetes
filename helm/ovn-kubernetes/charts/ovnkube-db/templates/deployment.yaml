@@ -7,7 +7,7 @@ apiVersion: apps/v1
 metadata:
   name: ovnkube-db
   # namespace set up by install
-  namespace: ovn-kubernetes
+  namespace: {{ .Release.Namespace }}
   annotations:
     kubernetes.io/description: |
       This daemonset launches the OVN NB/SB ovsdb service components.
@@ -26,11 +26,11 @@ spec:
   template:
     metadata:
       labels:
-        ovn-db-pod: "true"
         name: ovnkube-db
         component: network
         type: infra
         kubernetes.io/os: "linux"
+        ovn-db-pod: "true"
     spec:
       {{- if .Values.global.imagePullSecretName }}
       imagePullSecrets:

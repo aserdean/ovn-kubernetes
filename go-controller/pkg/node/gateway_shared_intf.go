@@ -1754,6 +1754,7 @@ func newSharedGateway(nodeName string, subnets []*net.IPNet, gwNextHops []net.IP
 	if err != nil {
 		return nil, err
 	}
+	klog.Errorf("gwBridge=%s exGwBridge=%s", gwBridge, exGwBridge)
 
 	if exGwBridge != nil {
 		gw.readyFunc = func() (bool, error) {

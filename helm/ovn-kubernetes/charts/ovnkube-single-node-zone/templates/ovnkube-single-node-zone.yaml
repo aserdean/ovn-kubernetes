@@ -6,7 +6,7 @@ apiVersion: apps/v1
 metadata:
   name: ovnkube-node
   # namespace set up by install
-  namespace: ovn-kubernetes
+  namespace: {{ .Release.Namespace }}
   annotations:
     kubernetes.io/description: |
       This DaemonSet launches the ovn-kubernetes networking components for worker nodes.
@@ -24,6 +24,8 @@ spec:
         component: network
         type: infra
         kubernetes.io/os: "linux"
+        ovn-db-pod: "true"
+        ovn.dpu.nvidia.com/skip-injection: ""
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
     spec:
@@ -196,7 +198,7 @@ spec:
             memory: 300Mi
         env:
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0s"
+          value: "1.0.0"
         - name: OVN_LOGLEVEL_NORTHD
           value: {{ default "-vconsole:info -vfile:info" .Values.northdLogLevel | quote }}
         - name: K8S_APISERVER
@@ -356,7 +358,7 @@ spec:
         - name: OVN_HYBRID_OVERLAY_NET_CIDR
           value: {{ default "" .Values.global.hybridOverlayNetCidr | quote }}
         - name: OVN_DISABLE_SNAT_MULTIPLE_GWS
-          value: {{ default "" .Values.disableSnatMultipleGws | quote }}
+          value: {{ default "" .Values.global.disableSnatMultipleGws | quote }}
         - name: OVN_DISABLE_FORWARDING
           value: {{ default "" .Values.global.disableForwarding | quote }}
         - name: OVN_ENCAP_PORT
@@ -379,6 +381,10 @@ spec:
           value: {{ default "" .Values.global.v4JoinSubnet | quote }}
         - name: OVN_V6_JOIN_SUBNET
           value: {{ default "" .Values.global.v6JoinSubnet | quote }}
+        - name: OVN_V4_MASQUERADE_SUBNET
+          value: {{ default "" .Values.global.v4MasqueradeSubnet | quote }}
+        - name: OVN_V6_MASQUERADE_SUBNET
+          value: {{ default "" .Values.global.v6MasqueradeSubnet | quote }}
         - name: OVN_MULTICAST_ENABLE
           value: {{ default "" .Values.global.enableMulticast | quote }}
         - name: OVN_UNPRIVILEGED_MODE
@@ -409,6 +415,8 @@ spec:
           value: {{ default "" .Values.global.emptyLbEvents | quote }}
         - name: OVN_ACL_LOGGING_RATE_LIMIT
           value: {{ default 20 .Values.global.aclLoggingRateLimit | quote }}
+        - name: OVN_STATELESS_NETPOL_ENABLE
+          value: {{ hasKey .Values.global "enableStatelessNetworkPolicy" | ternary .Values.global.enableStatelessNetworkPolicy false | quote }}
         - name: OVN_HOST_NETWORK_NAMESPACE
           valueFrom:
             configMapKeyRef:
@@ -425,7 +433,9 @@ spec:
         - name: OVN_ENABLE_OVNKUBE_IDENTITY
           value: {{ hasKey .Values.global "enableOvnKubeIdentity" | ternary .Values.global.enableOvnKubeIdentity true | quote }}
         - name: OVN_ENABLE_SVC_TEMPLATE_SUPPORT
-          value: {{ hasKey .Values.global "enableSvcTemplate" | ternary .Values.global.enableSvcTemplate true | quote }
+          value: {{ hasKey .Values.global "enableSvcTemplate" | ternary .Values.global.enableSvcTemplate true | quote }}
+        - name: OVN_ENABLE_DNSNAMERESOLVER
+          value: {{ hasKey .Values.global "enableDNSNameResolver" | ternary .Values.global.enableDNSNameResolver false | quote }}
         readinessProbe:
           exec:
             command: ["/usr/bin/ovn-kube-util", "readiness-probe", "-t", "ovnkube-node"]
@@ -464,7 +474,7 @@ spec:
         - name: OVN_DAEMONSET_VERSION
           value: "1.0.0"
         - name: OVN_LOGLEVEL_CONTROLLER
-          value: {{ default "-vconsole:info" .Values.ovnControllerLogLevel | quote }}
+          value: {{ default "-vconsole:debug" .Values.ovnControllerLogLevel | quote }}
         - name: K8S_APISERVER
           valueFrom:
             configMapKeyRef:

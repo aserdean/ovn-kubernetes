@@ -11,15 +11,17 @@
 all: ubuntu fedora
 
 SLASH = -
-ARCH = $(subst aarch64,arm64,$(subst x86_64,amd64,$(patsubst i%86,386,$(shell uname -m))))
+ARCH = $(subst aarch64,arm64,$(subst x86_64,amd64,$(patsubst i%86,386,$(shell go env GOARCH))))
 IMAGE_ARCH = $(SLASH)$(ARCH)
 DOCKERFILE_ARCH =
 ifeq ($(ARCH),arm64)
         DOCKERFILE_ARCH=.arm64
 endif
-OVS_BRANCH ?= master
+OVS_BRANCH ?= main
 OVN_BRANCH ?= main
 OCI_BIN ?= docker
+HARBOR=harbor.mellanox.com/cloud-orchestration-dev/aserdean
+
 
 # The image of ovnkube/ovn-daemonset-ubuntu should be multi-arched before using it on arm64
 ubuntu: bld
@@ -28,10 +30,11 @@ ifeq ($(ARCH),amd64)
 	${OCI_BIN} tag "ovn-kube-ubuntu$(IMAGE_ARCH):latest" \
               "ovn-kube-ubuntu:latest"
 endif
+	${OCI_BIN} tag "ovn-kube-ubuntu$(IMAGE_ARCH):latest" $(HARBOR)/ovn-daemonset-ubuntu$(IMAGE_ARCH):alin-dev-upstream
 	# This is the default in the ovnkube*.yaml files
 	# ${OCI_BIN} login -u ovnkube docker.io/ovnkube
-	# ${OCI_BIN} push docker.io/ovnkube/ovn-daemonset-ubuntu:latest
-	./daemonset.sh --image=docker.io/ovnkube/ovn-daemonset-ubuntu:latest
+	${OCI_BIN} push $(HARBOR)/ovn-daemonset-ubuntu$(IMAGE_ARCH):alin-dev-upstream
+	./daemonset.sh --image=$(HARBOR)/ovn-daemonset-ubuntu$(IMAGE_ARCH):alin-dev-upstream
 
 fedora: bld
 	${OCI_BIN} build -t ovn-kube-fedora -f Dockerfile.fedora .
@@ -59,7 +62,7 @@ fedora-dev: bld
                     --ovn_nb_raft_election_timer="1000" \
                     --ovn_sb_raft_election_timer="1000"
 
-DOCKER_IMAGE_TAG = latest
+DOCKER_IMAGE_TAG = alin-dev-upstream
 
 # Multi-arch the ubuntu based image with fat-manifest
 ubuntu-image-multi-arch:

@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
     name: ovnkube-node
-    namespace: ovn-kubernetes
+    namespace: {{ .Release.Namespace }}
 
 # When ovn_enable_ovnkube_identity is true, an ovnkube-node process will identify as a user in a system:ovn-nodes group,
 # not the ovnkube-node serviceAccount
@@ -23,7 +23,10 @@ subjects:
     {{- else }}
     - kind: ServiceAccount
       name: ovnkube-node
-      namespace: ovn-kubernetes
+      namespace: {{ .Release.Namespace }}
+    - kind: ServiceAccount
+      name: {{ .Values.dpuServiceAccountName }}
+      namespace: {{ .Values.dpuServiceAccountNamespace }}
     {{- end }}
 
 
@@ -43,14 +46,17 @@ roleRef:
 subjects:
     - kind: ServiceAccount
       name: ovnkube-node
-      namespace: ovn-kubernetes
+      namespace: {{ .Release.Namespace }}
+    - kind: ServiceAccount
+      name: {{ .Values.dpuServiceAccountName }}
+      namespace: {{ .Values.dpuServiceAccountNamespace }}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
     name: ovnkube-node-configmaps
-    namespace: ovn-kubernetes
+    namespace: {{ .Release.Namespace }}
 roleRef:
     name: ovn-k8s-configmap
     kind: Role
@@ -63,7 +69,7 @@ subjects:
     {{- else }}
     - kind: ServiceAccount
       name: ovnkube-node
-      namespace: ovn-kubernetes
+      namespace: {{ .Release.Namespace }}
     {{- end }}
 
 # In IC ovnkube-node pod needs configmap access in ovn-k ns for topology version:
@@ -74,7 +80,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
     name: ovnkube-node-ic-configmaps-update
-    namespace: ovn-kubernetes
+    namespace: {{ .Release.Namespace }}
 roleRef:
     name: ovn-k8s-configmap-update
     kind: Role
@@ -87,7 +93,7 @@ subjects:
     {{- else }}
     - kind: ServiceAccount
       name: ovnkube-node
-      namespace: ovn-kubernetes
+      namespace: {{ .Release.Namespace }}
     {{- end }}
 {{- end }}
 
@@ -99,7 +105,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
     name: ovnkube-node-ep
-    namespace: ovn-kubernetes
+    namespace: {{ .Release.Namespace }}
 roleRef:
     name: ovnkube-node-ep
     kind: Role
@@ -107,7 +113,7 @@ roleRef:
 subjects:
     - kind: ServiceAccount
       name: ovnkube-node
-      namespace: ovn-kubernetes
+      namespace: {{ .Release.Namespace }}
 
 
 ---
@@ -150,12 +156,18 @@ rules:
       verbs: [ "get", "list", "watch" ]
     - apiGroups: ["k8s.cni.cncf.io"]
       resources:
+          - ipamclaims
           - multi-networkpolicies
       verbs: ["list", "get", "watch"]
+    - apiGroups: [ "k8s.cni.cncf.io" ]
+      resources:
+          - ipamclaims/status
+      verbs: [ "patch", "update" ]
     - apiGroups: ["k8s.ovn.org"]
       resources:
           - egressfirewalls/status
           - adminpolicybasedexternalroutes/status
+          - egressqoses/status
       verbs: [ "patch", "update" ]
     - apiGroups: ["policy.networking.k8s.io"]
       resources:
@@ -198,6 +210,12 @@ rules:
           - pods/status # In IC ovnkube-controller, and ovnkube-node in DPU mode updates pod annotations for local pods
           - nodes/status
       verbs: [ "patch", "update" ]
+    {{- if eq (hasKey .Values.global "enableDNSNameResolver" | ternary .Values.global.enableDNSNameResolver false) true }}
+    - apiGroups: ["network.openshift.io"]
+      resources:
+          - dnsnameresolvers
+      verbs: [ "get", "list", "watch" ]
+    {{- end }}
 
 # Without IC endpoints are read by ovnkube-node on startup
 # With IC endpoints are created by ovnkube-zone-controller/sb-ovsdb startup script in multinode-zone for IC
@@ -206,7 +224,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
     name: ovnkube-node-ep
-    namespace: ovn-kubernetes
+    namespace: {{ .Release.Namespace }}
 rules:
     - apiGroups: [""]
       resources:

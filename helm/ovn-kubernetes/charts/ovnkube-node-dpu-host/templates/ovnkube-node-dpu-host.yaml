@@ -7,7 +7,7 @@ apiVersion: apps/v1
 metadata:
   name: ovnkube-node-dpu-host
   # namespace set up by install
-  namespace: ovn-kubernetes
+  namespace: {{ .Release.Namespace }}
   annotations:
     kubernetes.io/description: |
       This DaemonSet launches the ovn-kubernetes networking components for worker nodes.
@@ -108,6 +108,8 @@ spec:
           value: {{ default 5 .Values.logFileMaxBackups | quote }}
         - name: OVNKUBE_LOGFILE_MAXAGE
           value:  {{ default 5 .Values.logFileMaxAge | quote }}
+#        - name: OVN_ENABLE_INTERCONNECT
+#          value: {{ hasKey .Values.global "enableInterconnect" | ternary .Values.global.enableInterconnect false | quote }}
         - name: OVN_NET_CIDR
           valueFrom:
             configMapKeyRef:
@@ -145,7 +147,7 @@ spec:
         - name: OVN_GATEWAY_MODE
           value: {{ default "shared" .Values.global.gatewayMode }}
         - name: OVN_GATEWAY_OPTS
-          value: {{ default "" .Values.global.gatewayOps | quote }}
+          value: {{ default "" .Values.gatewayOpts | quote }}
         - name: OVN_HYBRID_OVERLAY_ENABLE
           value: {{ default "" .Values.global.enableHybridOverlay | quote }}
         - name: OVN_ADMIN_NETWORK_POLICY_ENABLE
@@ -197,7 +199,7 @@ spec:
         - name: OVNKUBE_NODE_MODE
           value: "dpu-host"
         - name: OVNKUBE_NODE_MGMT_PORT_NETDEV
-          value: {{ default "" .Values.global.nodeMgmtPortNetdev | quote }}
+          value: {{ default "" .Values.nodeMgmtPortNetdev | quote }}
         - name: OVN_HOST_NETWORK_NAMESPACE
           valueFrom:
             configMapKeyRef:

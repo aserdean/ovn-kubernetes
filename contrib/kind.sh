@@ -581,6 +581,9 @@ set_default_params() {
   OVN_METRICS_SCALE_ENABLE=${OVN_METRICS_SCALE_ENABLE:-false}
   OVN_ISOLATED=${OVN_ISOLATED:-false}
   OVN_GATEWAY_OPTS=${OVN_GATEWAY_OPTS:-""}
+  if [ -f /etc/init-output/ovn_gateway_opts ]; then
+   ovn_gateway_opts="${ovn_gateway_opts} $(cat /etc/init-output/ovn_gateway_opts)"
+ fi
   if [ "$OVN_ISOLATED" == true ]; then
     OVN_GATEWAY_OPTS="--gateway-interface=eth0"
   fi
