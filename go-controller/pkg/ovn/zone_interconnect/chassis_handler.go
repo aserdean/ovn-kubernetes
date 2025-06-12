@@ -134,6 +134,12 @@ func (zch *ZoneChassisHandler) createOrUpdateNodeChassis(node *corev1.Node, isRe
 			node.Name, parsedErr)
 	}
 
+	// Get the chassis name in case of dpu host as chassis belongs to the associated dpu.
+	chassisHostName, err := util.ParseNodeChassisNameAnnotation(node)
+	if err != nil {
+		chassisHostName = node.Name
+	}
+
 	// Get the encap IPs.
 	encapIPs, err := util.ParseNodeEncapIPsAnnotation(node)
 	if err != nil {
@@ -161,7 +167,7 @@ func (zch *ZoneChassisHandler) createOrUpdateNodeChassis(node *corev1.Node, isRe
 
 	chassis := sbdb.Chassis{
 		Name:     chassisID,
-		Hostname: node.Name,
+		Hostname: chassisHostName,
 		OtherConfig: map[string]string{
 			"is-remote": strconv.FormatBool(isRemote),
 		},
