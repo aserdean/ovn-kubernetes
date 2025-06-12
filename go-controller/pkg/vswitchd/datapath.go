@@ -9,11 +9,12 @@ const DatapathTable = "Datapath"
 
 // Datapath defines an object in Datapath table
 type Datapath struct {
-	UUID            string            `ovsdb:"_uuid"`
-	Capabilities    map[string]string `ovsdb:"capabilities"`
-	CTZones         map[int]string    `ovsdb:"ct_zones"`
-	DatapathVersion string            `ovsdb:"datapath_version"`
-	ExternalIDs     map[string]string `ovsdb:"external_ids"`
+	UUID               string            `ovsdb:"_uuid"`
+	Capabilities       map[string]string `ovsdb:"capabilities"`
+	CTZoneDefaultLimit *int              `ovsdb:"ct_zone_default_limit"`
+	CTZones            map[int]string    `ovsdb:"ct_zones"`
+	DatapathVersion    string            `ovsdb:"datapath_version"`
+	ExternalIDs        map[string]string `ovsdb:"external_ids"`
 }
 
 func (a *Datapath) GetUUID() string {
@@ -48,6 +49,28 @@ func equalDatapathCapabilities(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func (a *Datapath) GetCTZoneDefaultLimit() *int {
+	return a.CTZoneDefaultLimit
+}
+
+func copyDatapathCTZoneDefaultLimit(a *int) *int {
+	if a == nil {
+		return nil
+	}
+	b := *a
+	return &b
+}
+
+func equalDatapathCTZoneDefaultLimit(a, b *int) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return *a == *b
 }
 
 func (a *Datapath) GetCTZones() map[int]string {
@@ -117,6 +140,7 @@ func equalDatapathExternalIDs(a, b map[string]string) bool {
 func (a *Datapath) DeepCopyInto(b *Datapath) {
 	*b = *a
 	b.Capabilities = copyDatapathCapabilities(a.Capabilities)
+	b.CTZoneDefaultLimit = copyDatapathCTZoneDefaultLimit(a.CTZoneDefaultLimit)
 	b.CTZones = copyDatapathCTZones(a.CTZones)
 	b.ExternalIDs = copyDatapathExternalIDs(a.ExternalIDs)
 }
@@ -139,6 +163,7 @@ func (a *Datapath) CloneModel() model.Model {
 func (a *Datapath) Equals(b *Datapath) bool {
 	return a.UUID == b.UUID &&
 		equalDatapathCapabilities(a.Capabilities, b.Capabilities) &&
+		equalDatapathCTZoneDefaultLimit(a.CTZoneDefaultLimit, b.CTZoneDefaultLimit) &&
 		equalDatapathCTZones(a.CTZones, b.CTZones) &&
 		a.DatapathVersion == b.DatapathVersion &&
 		equalDatapathExternalIDs(a.ExternalIDs, b.ExternalIDs)

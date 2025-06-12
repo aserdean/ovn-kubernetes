@@ -15,6 +15,8 @@ type OpenvSwitch struct {
 	DatapathTypes   []string          `ovsdb:"datapath_types"`
 	Datapaths       map[string]string `ovsdb:"datapaths"`
 	DbVersion       *string           `ovsdb:"db_version"`
+	DocaInitialized bool              `ovsdb:"doca_initialized"`
+	DocaVersion     *string           `ovsdb:"doca_version"`
 	DpdkInitialized bool              `ovsdb:"dpdk_initialized"`
 	DpdkVersion     *string           `ovsdb:"dpdk_version"`
 	ExternalIDs     map[string]string `ovsdb:"external_ids"`
@@ -136,6 +138,32 @@ func copyOpenvSwitchDbVersion(a *string) *string {
 }
 
 func equalOpenvSwitchDbVersion(a, b *string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return *a == *b
+}
+
+func (a *OpenvSwitch) GetDocaInitialized() bool {
+	return a.DocaInitialized
+}
+
+func (a *OpenvSwitch) GetDocaVersion() *string {
+	return a.DocaVersion
+}
+
+func copyOpenvSwitchDocaVersion(a *string) *string {
+	if a == nil {
+		return nil
+	}
+	b := *a
+	return &b
+}
+
+func equalOpenvSwitchDocaVersion(a, b *string) bool {
 	if (a == nil) != (b == nil) {
 		return false
 	}
@@ -415,6 +443,7 @@ func (a *OpenvSwitch) DeepCopyInto(b *OpenvSwitch) {
 	b.DatapathTypes = copyOpenvSwitchDatapathTypes(a.DatapathTypes)
 	b.Datapaths = copyOpenvSwitchDatapaths(a.Datapaths)
 	b.DbVersion = copyOpenvSwitchDbVersion(a.DbVersion)
+	b.DocaVersion = copyOpenvSwitchDocaVersion(a.DocaVersion)
 	b.DpdkVersion = copyOpenvSwitchDpdkVersion(a.DpdkVersion)
 	b.ExternalIDs = copyOpenvSwitchExternalIDs(a.ExternalIDs)
 	b.IfaceTypes = copyOpenvSwitchIfaceTypes(a.IfaceTypes)
@@ -449,6 +478,8 @@ func (a *OpenvSwitch) Equals(b *OpenvSwitch) bool {
 		equalOpenvSwitchDatapathTypes(a.DatapathTypes, b.DatapathTypes) &&
 		equalOpenvSwitchDatapaths(a.Datapaths, b.Datapaths) &&
 		equalOpenvSwitchDbVersion(a.DbVersion, b.DbVersion) &&
+		a.DocaInitialized == b.DocaInitialized &&
+		equalOpenvSwitchDocaVersion(a.DocaVersion, b.DocaVersion) &&
 		a.DpdkInitialized == b.DpdkInitialized &&
 		equalOpenvSwitchDpdkVersion(a.DpdkVersion, b.DpdkVersion) &&
 		equalOpenvSwitchExternalIDs(a.ExternalIDs, b.ExternalIDs) &&

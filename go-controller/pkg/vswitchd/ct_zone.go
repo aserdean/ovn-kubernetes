@@ -11,6 +11,7 @@ const CTZoneTable = "CT_Zone"
 type CTZone struct {
 	UUID          string            `ovsdb:"_uuid"`
 	ExternalIDs   map[string]string `ovsdb:"external_ids"`
+	Limit         *int              `ovsdb:"limit"`
 	TimeoutPolicy *string           `ovsdb:"timeout_policy"`
 }
 
@@ -48,6 +49,28 @@ func equalCTZoneExternalIDs(a, b map[string]string) bool {
 	return true
 }
 
+func (a *CTZone) GetLimit() *int {
+	return a.Limit
+}
+
+func copyCTZoneLimit(a *int) *int {
+	if a == nil {
+		return nil
+	}
+	b := *a
+	return &b
+}
+
+func equalCTZoneLimit(a, b *int) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return *a == *b
+}
+
 func (a *CTZone) GetTimeoutPolicy() *string {
 	return a.TimeoutPolicy
 }
@@ -73,6 +96,7 @@ func equalCTZoneTimeoutPolicy(a, b *string) bool {
 func (a *CTZone) DeepCopyInto(b *CTZone) {
 	*b = *a
 	b.ExternalIDs = copyCTZoneExternalIDs(a.ExternalIDs)
+	b.Limit = copyCTZoneLimit(a.Limit)
 	b.TimeoutPolicy = copyCTZoneTimeoutPolicy(a.TimeoutPolicy)
 }
 
@@ -94,6 +118,7 @@ func (a *CTZone) CloneModel() model.Model {
 func (a *CTZone) Equals(b *CTZone) bool {
 	return a.UUID == b.UUID &&
 		equalCTZoneExternalIDs(a.ExternalIDs, b.ExternalIDs) &&
+		equalCTZoneLimit(a.Limit, b.Limit) &&
 		equalCTZoneTimeoutPolicy(a.TimeoutPolicy, b.TimeoutPolicy)
 }
 
