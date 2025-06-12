@@ -1,3 +1,4 @@
+{{- if eq .Values.global.enableInterconnect false }}
 # ovnkube-node-dpu
 # daemonset version 3
 # starts node daemons for ovn, each in a separate container
@@ -393,3 +394,4 @@ spec:
           path: /run/systemd
       tolerations:
       - operator: "Exists"
+{{- end }}
