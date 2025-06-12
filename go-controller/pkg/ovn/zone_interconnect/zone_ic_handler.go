@@ -458,9 +458,14 @@ func (zic *ZoneInterconnectHandler) createRemoteZoneNodeResources(node *corev1.N
 		remotePortAddr = remotePortAddr + " " + tsNetwork
 	}
 
+	// Get the chassis name in case of dpu host as chassis belongs to the associated dpu.
+	chassisHostName, err := util.ParseNodeChassisNameAnnotation(node)
+	if err != nil {
+		chassisHostName = node.Name
+	}
 	lspOptions := map[string]string{
 		"requested-tnl-key": strconv.Itoa(nodeID),
-		"requested-chassis": node.Name,
+		"requested-chassis": chassisHostName,
 	}
 	// Store the node name in the external_ids column for book keeping
 	externalIDs := map[string]string{
