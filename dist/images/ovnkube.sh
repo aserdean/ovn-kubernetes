@@ -1954,14 +1954,6 @@ ovnkube-controller-with-node() {
     fi
   fi
 
-  if [[ ${ovnkube_node_mode} != "dpu-host" && ! ${ovn_gateway_opts} =~ "gateway-vlanid" ]]; then
-      # get the gateway vlanid
-      gw_vlanid=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-gw-vlanid | tr -d \")
-      if [[ -n ${gw_vlanid} ]]; then
-        ovn_gateway_opts+="--gateway-vlanid=${gw_vlanid}"
-      fi
-  fi
-
   ovnkube_node_mgmt_port_netdev_flag=
   if [[ ${ovnkube_node_mgmt_port_netdev} != "" ]]; then
     ovnkube_node_mgmt_port_netdev_flag="--ovnkube-node-mgmt-port-netdev=${ovnkube_node_mgmt_port_netdev}"
@@ -2090,6 +2082,47 @@ ovnkube-controller-with-node() {
           ovn_stateless_netpol_enable_flag="--enable-stateless-netpol"
   fi
 
+  ovn_disable_requestedchassis_flag=
+  if [[ ${ovn_disable_requestedchassis} == "true" ]]; then
+	  ovn_disable_requestedchassis_flag="--disable-requestedchassis"
+  fi
+  echo "ovn_disable_requestedchassis_flag=${ovn_disable_requestedchassis_flag}"
+  
+  if [[ ${ovnkube_node_mode} == "dpu" ]]; then
+    if [[ ${ovn_gateway_opts} == "" ]]; then
+      # get the gateway interface
+      gw_iface=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-gw-interface | tr -d \")
+      if [[ ${gw_iface} == "" ]]; then
+        echo "Couldn't get the required OVN Gateway Interface. Exiting..."
+        exit 1
+      fi
+      ovn_gateway_opts="--gateway-interface=${gw_iface} "
+
+      # get the gateway nexthop
+      gw_nexthop=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-gw-nexthop | tr -d \")
+      if [[ ${gw_nexthop} == "" ]]; then
+        echo "Couldn't get the required OVN Gateway NextHop. Exiting..."
+        exit 1
+      fi
+      ovn_gateway_opts+="--gateway-nexthop=${gw_nexthop} "
+    fi
+
+    # this is required if the DPU and DPU Host are in different subnets
+    if [[ ${ovn_gateway_router_subnet} == "" ]]; then
+      # get the gateway router subnet
+      ovn_gateway_router_subnet=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-gw-router-subnet | tr -d \")
+    fi
+
+  fi
+
+  if [[ ${ovnkube_node_mode} != "dpu-host" && ! ${ovn_gateway_opts} =~ "gateway-vlanid" ]]; then
+      # get the gateway vlanid
+      gw_vlanid=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:ovn-gw-vlanid | tr -d \")
+      if [[ -n ${gw_vlanid} ]]; then
+        ovn_gateway_opts+="--gateway-vlanid=${gw_vlanid}"
+      fi
+  fi
+
   echo "=============== ovnkube-controller-with-node --init-ovnkube-controller-with-node=========="
   /usr/bin/ovnkube --init-ovnkube-controller ${K8S_NODE} --init-node ${K8S_NODE} \
     ${anp_enabled_flag} \
@@ -2142,6 +2175,7 @@ ovnkube-controller-with-node() {
     ${ssl_opts} \
     ${network_qos_enabled_flag} \
     ${ovn_enable_dnsnameresolver_flag} \
+    ${ovn_disable_requestedchassis_flag} \
     --cluster-subnets ${net_cidr} --k8s-service-cidr=${svc_cidr} \
     --export-ovs-metrics \
     --gateway-mode=${ovn_gateway_mode} ${ovn_gateway_opts} \
@@ -2336,6 +2370,11 @@ ovn-cluster-manager() {
   fi
   echo "ovn_enable_dnsnameresolver_flag=${ovn_enable_dnsnameresolver_flag}"
 
+  nohostsubnet_label_option=
+  if [[ ${ovn_nohostsubnet_label} != "" ]]; then
+	  nohostsubnet_label_option="--no-hostsubnet-nodes=${ovn_nohostsubnet_label}"
+  fi
+
   echo "=============== ovn-cluster-manager ========== MASTER ONLY"
   /usr/bin/ovnkube --init-cluster-manager ${K8S_NODE} \
     ${anp_enabled_flag} \
@@ -2363,6 +2402,7 @@ ovn-cluster-manager() {
     ${ovn_v6_transit_switch_subnet_opt} \
     ${network_qos_enabled_flag} \
     ${ovn_enable_dnsnameresolver_flag} \
+    ${nohostsubnet_label_option} \
     --gateway-mode=${ovn_gateway_mode} \
     --cluster-subnets ${net_cidr} --k8s-service-cidr=${svc_cidr} \
     --host-network-namespace ${ovn_host_network_namespace} \
