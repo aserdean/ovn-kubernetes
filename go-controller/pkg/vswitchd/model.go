@@ -37,7 +37,7 @@ func FullDatabaseModel() (model.ClientDBModel, error) {
 
 var schema = `{
   "name": "Open_vSwitch",
-  "version": "8.3.0",
+  "version": "8.5.1",
   "tables": {
     "AutoAttach": {
       "columns": {
@@ -350,6 +350,17 @@ var schema = `{
             "max": "unlimited"
           }
         },
+        "limit": {
+          "type": {
+            "key": {
+              "type": "integer",
+              "minInteger": 0,
+              "maxInteger": 4294967295
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
         "timeout_policy": {
           "type": {
             "key": {
@@ -560,6 +571,17 @@ var schema = `{
             "max": "unlimited"
           }
         },
+        "ct_zone_default_limit": {
+          "type": {
+            "key": {
+              "type": "integer",
+              "minInteger": 0,
+              "maxInteger": 4294967295
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
         "ct_zones": {
           "type": {
             "key": {
@@ -710,7 +732,7 @@ var schema = `{
               "type": "string"
             },
             "min": 0,
-            "max": 3
+            "max": 4
           }
         }
       }
@@ -796,6 +818,17 @@ var schema = `{
             "max": 1
           }
         },
+        "stats_interval": {
+          "type": {
+            "key": {
+              "type": "integer",
+              "minInteger": 1,
+              "maxInteger": 3600
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
         "targets": {
           "type": {
             "key": {
@@ -803,6 +836,17 @@ var schema = `{
             },
             "min": 0,
             "max": "unlimited"
+          }
+        },
+        "template_interval": {
+          "type": {
+            "key": {
+              "type": "integer",
+              "minInteger": 1,
+              "maxInteger": 3600
+            },
+            "min": 0,
+            "max": 1
           }
         }
       }
@@ -848,7 +892,8 @@ var schema = `{
             },
             "min": 0,
             "max": "unlimited"
-          }
+          },
+          "ephemeral": true
         },
         "cfm_fault": {
           "type": {
@@ -1476,6 +1521,18 @@ var schema = `{
           }
         },
         "db_version": {
+          "type": {
+            "key": {
+              "type": "string"
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
+        "doca_initialized": {
+          "type": "boolean"
+        },
+        "doca_version": {
           "type": {
             "key": {
               "type": "string"

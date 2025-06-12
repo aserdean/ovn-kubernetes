@@ -17,7 +17,9 @@ type IPFIX struct {
 	ObsPointID         *int              `ovsdb:"obs_point_id"`
 	OtherConfig        map[string]string `ovsdb:"other_config"`
 	Sampling           *int              `ovsdb:"sampling"`
+	StatsInterval      *int              `ovsdb:"stats_interval"`
 	Targets            []string          `ovsdb:"targets"`
+	TemplateInterval   *int              `ovsdb:"template_interval"`
 }
 
 func (a *IPFIX) GetUUID() string {
@@ -194,6 +196,28 @@ func equalIPFIXSampling(a, b *int) bool {
 	return *a == *b
 }
 
+func (a *IPFIX) GetStatsInterval() *int {
+	return a.StatsInterval
+}
+
+func copyIPFIXStatsInterval(a *int) *int {
+	if a == nil {
+		return nil
+	}
+	b := *a
+	return &b
+}
+
+func equalIPFIXStatsInterval(a, b *int) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return *a == *b
+}
+
 func (a *IPFIX) GetTargets() []string {
 	return a.Targets
 }
@@ -222,6 +246,28 @@ func equalIPFIXTargets(a, b []string) bool {
 	return true
 }
 
+func (a *IPFIX) GetTemplateInterval() *int {
+	return a.TemplateInterval
+}
+
+func copyIPFIXTemplateInterval(a *int) *int {
+	if a == nil {
+		return nil
+	}
+	b := *a
+	return &b
+}
+
+func equalIPFIXTemplateInterval(a, b *int) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return *a == *b
+}
+
 func (a *IPFIX) DeepCopyInto(b *IPFIX) {
 	*b = *a
 	b.CacheActiveTimeout = copyIPFIXCacheActiveTimeout(a.CacheActiveTimeout)
@@ -231,7 +277,9 @@ func (a *IPFIX) DeepCopyInto(b *IPFIX) {
 	b.ObsPointID = copyIPFIXObsPointID(a.ObsPointID)
 	b.OtherConfig = copyIPFIXOtherConfig(a.OtherConfig)
 	b.Sampling = copyIPFIXSampling(a.Sampling)
+	b.StatsInterval = copyIPFIXStatsInterval(a.StatsInterval)
 	b.Targets = copyIPFIXTargets(a.Targets)
+	b.TemplateInterval = copyIPFIXTemplateInterval(a.TemplateInterval)
 }
 
 func (a *IPFIX) DeepCopy() *IPFIX {
@@ -258,7 +306,9 @@ func (a *IPFIX) Equals(b *IPFIX) bool {
 		equalIPFIXObsPointID(a.ObsPointID, b.ObsPointID) &&
 		equalIPFIXOtherConfig(a.OtherConfig, b.OtherConfig) &&
 		equalIPFIXSampling(a.Sampling, b.Sampling) &&
-		equalIPFIXTargets(a.Targets, b.Targets)
+		equalIPFIXStatsInterval(a.StatsInterval, b.StatsInterval) &&
+		equalIPFIXTargets(a.Targets, b.Targets) &&
+		equalIPFIXTemplateInterval(a.TemplateInterval, b.TemplateInterval)
 }
 
 func (a *IPFIX) EqualsModel(b model.Model) bool {
