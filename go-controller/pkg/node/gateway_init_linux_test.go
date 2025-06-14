@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	utilnet "k8s.io/utils/net"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
 	adminpolicybasedrouteclient "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/fake"
@@ -719,7 +720,9 @@ func shareGatewayInterfaceDPUTest(app *cli.App, testNS ns.NetNS,
 		k := &kube.Kube{KClient: kubeFakeClient}
 
 		nodeAnnotator := kube.NewNodeAnnotator(k, existingNode.Name)
-
+		err = util.SetNodeHostCIDRs(nodeAnnotator, sets.New(hostCIDR))
+		Expect(err).NotTo(HaveOccurred())
+		config.Gateway.RouterSubnet = nodeSubnet
 		err = util.SetNodeHostSubnetAnnotation(nodeAnnotator, ovntest.MustParseIPNets(nodeSubnet))
 		Expect(err).NotTo(HaveOccurred())
 		err = nodeAnnotator.Run()
@@ -887,8 +890,10 @@ func shareGatewayInterfaceDPUHostTest(app *cli.App, testNS ns.NetNS, uplinkName,
 
 		err = testNS.Do(func(ns.NetNS) error {
 			defer GinkgoRecover()
+			k := &kube.Kube{KClient: kubeFakeClient}
+			nodeAnnotator := kube.NewNodeAnnotator(k, existingNode.Name)
 
-			err := nc.initGatewayDPUHost(net.ParseIP(hostIP))
+			err := nc.initGatewayDPUHost(net.ParseIP(hostIP), nodeAnnotator)
 			Expect(err).NotTo(HaveOccurred())
 
 			link, err := netlink.LinkByName(uplinkName)

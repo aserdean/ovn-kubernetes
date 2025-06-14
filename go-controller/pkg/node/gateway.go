@@ -563,26 +563,30 @@ func (b *bridgeConfiguration) getGatewayIface() string {
 func (b *bridgeConfiguration) updateInterfaceIPAddresses(node *corev1.Node) ([]*net.IPNet, error) {
 	b.Lock()
 	defer b.Unlock()
-	ifAddrs, err := getNetworkInterfaceIPAddresses(b.getGatewayIface())
+
+	var err error
+	var ifAddrs []*net.IPNet
+	if config.OvnKubeNode.Mode == types.NodeModeFull {
+		ifAddrs, err = getNetworkInterfaceIPAddresses(b.getGatewayIface())
+	} else {
+		// For DPU, here we need to use the DPU host's IP address which is the tenant cluster's
+		// host internal IP address instead of the DPU's external bridge IP address.
+		temp, err := util.ParseNodeHostCIDRs(node)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse addresses from node host %s: %s", node.Name, err.Error())
+		}
+		cidrs := temp.UnsortedList()
+		if len(cidrs) == 0 {
+			return nil, fmt.Errorf("no CIDRs found for node %s", node.Name)
+		}
+		_, nodeCIDR, err := net.ParseCIDR(cidrs[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse CIDR %v: %w", cidrs[0], err)
+		}
+		ifAddrs = []*net.IPNet{nodeCIDR}
+	}
 	if err != nil {
 		return nil, err
-	}
-
-	// For DPU, here we need to use the DPU host's IP address which is the tenant cluster's
-	// host internal IP address instead of the DPU's external bridge IP address.
-	if config.OvnKubeNode.Mode == types.NodeModeDPU {
-		nodeAddrStr, err := util.GetNodePrimaryIP(node)
-		if err != nil {
-			return nil, err
-		}
-		nodeAddr := net.ParseIP(nodeAddrStr)
-		if nodeAddr == nil {
-			return nil, fmt.Errorf("failed to parse node IP address. %v", nodeAddrStr)
-		}
-		ifAddrs, err = getDPUHostPrimaryIPAddresses(nodeAddr, ifAddrs)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	b.ips = ifAddrs

@@ -9,6 +9,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
@@ -324,7 +326,7 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 	subnets []*net.IPNet,
 	nodeAnnotator kube.Annotator,
 	mgmtPort managementport.Interface,
-	kubeNodeIP net.IP,
+	_ net.IP,
 ) (*gateway, error) {
 
 	klog.Info("Initializing Gateway Functionality for Gateway PreStart")
@@ -351,10 +353,24 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 	// For DPU need to use the host IP addr which currently is assumed to be K8s Node cluster
 	// internal IP address.
 	if config.OvnKubeNode.Mode == types.NodeModeDPU {
-		ifAddrs, err = getDPUHostPrimaryIPAddresses(kubeNodeIP, ifAddrs)
-		if err != nil {
-			return nil, err
+		var node *corev1.Node
+		if node, err = nc.watchFactory.GetNode(nc.name); err != nil {
+			return nil, fmt.Errorf("error retrieving node %s: %v", nc.name, err)
 		}
+		temp, err := util.ParseNodeHostCIDRs(node)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse addresses from node host %s: %s", node.Name, err.Error())
+		}
+		cidrs := temp.UnsortedList()
+		if len(cidrs) == 0 {
+			return nil, fmt.Errorf("no CIDRs found for node %s", node.Name)
+		}
+		// For now we assume only on node cidr is available per host
+		_, nodeCIDR, err := net.ParseCIDR(cidrs[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get parse CIDR %v: %w", temp.UnsortedList()[0], err)
+		}
+		ifAddrs = []*net.IPNet{nodeCIDR}
 	}
 
 	if err := util.SetNodePrimaryIfAddrs(nodeAnnotator, ifAddrs); err != nil {
@@ -488,29 +504,39 @@ func interfaceForEXGW(intfName string) string {
 	return intfName
 }
 
-func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP) error {
+func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP, nodeAnnotator kube.Annotator) error {
 	// A DPU host gateway is complementary to the shared gateway running
 	// on the DPU embedded CPU. it performs some initializations and
 	// watch on services for iptable rule updates and run a loadBalancerHealth checker
 	// Note: all K8s Node related annotations are handled from DPU.
 	klog.Info("Initializing Shared Gateway Functionality on DPU host")
 	var err error
+	var gwIntf, gatewayIntf string
 
-	// Force gateway interface to be the interface associated with kubeNodeIP
-	gwIntf, err := getInterfaceByIP(kubeNodeIP)
-	if err != nil {
-		return err
-	}
-	config.Gateway.Interface = gwIntf
-
-	_, gatewayIntf, err := getGatewayNextHops()
-	if err != nil {
-		return err
+	if config.Gateway.Interface == "" {
+		gwIntf, err = getInterfaceByIP(kubeNodeIP)
+		if err != nil {
+			return err
+		}
+		config.Gateway.Interface = gwIntf
+		_, gatewayIntf, err = getGatewayNextHops()
+		if err != nil {
+			return err
+		}
+	} else {
+		gatewayIntf = config.Gateway.Interface
+		gwIntf = gatewayIntf
 	}
 
 	ifAddrs, err := getNetworkInterfaceIPAddresses(gatewayIntf)
 	if err != nil {
 		return err
+	}
+
+	nodeIPNetv4, _ := util.MatchFirstIPNetFamily(false, ifAddrs)
+	nodeAddrSet := sets.New[string](nodeIPNetv4.String())
+	if err := util.SetNodeHostCIDRs(nodeAnnotator, nodeAddrSet); err != nil {
+		klog.Errorf("Unable to set host-cidrs on node, err: %v", err)
 	}
 
 	// Delete stale masquerade resources if there are any. This is to make sure that there
