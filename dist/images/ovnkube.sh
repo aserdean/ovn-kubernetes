@@ -1657,6 +1657,12 @@ ovnkube-controller() {
   fi
   echo "ovn_stateless_netpol_enable_flag: ${ovn_stateless_netpol_enable_flag}"
 
+  ovn_disable_requestedchassis_flag=
+  if [[ ${ovn_disable_requestedchassis} == "true" ]]; then
+	  ovn_disable_requestedchassis_flag="--disable-requestedchassis"
+  fi
+  echo "ovn_disable_requestedchassis_flag=${ovn_disable_requestedchassis_flag}"
+
   echo "=============== ovnkube-controller ========== MASTER ONLY"
   /usr/bin/ovnkube --init-ovnkube-controller ${K8S_NODE} \
     ${anp_enabled_flag} \
@@ -1692,6 +1698,7 @@ ovnkube-controller() {
     ${ovn_v6_masquerade_subnet_opt} \
     ${network_qos_enabled_flag} \
     ${ovn_enable_dnsnameresolver_flag} \
+    ${ovn_disable_requestedchassis_flag} \
     --cluster-subnets ${net_cidr} --k8s-service-cidr=${svc_cidr} \
     --gateway-mode=${ovn_gateway_mode} \
     --host-network-namespace ${ovn_host_network_namespace} \
@@ -2097,6 +2104,12 @@ ovnkube-controller-with-node() {
           ovn_stateless_netpol_enable_flag="--enable-stateless-netpol"
   fi
 
+  ovn_disable_requestedchassis_flag=
+  if [[ ${ovn_disable_requestedchassis} == "true" ]]; then
+          ovn_disable_requestedchassis_flag="--disable-requestedchassis"
+  fi
+  echo "ovn_disable_requestedchassis_flag=${ovn_disable_requestedchassis_flag}"
+
   echo "=============== ovnkube-controller-with-node --init-ovnkube-controller-with-node=========="
   /usr/bin/ovnkube --init-ovnkube-controller ${K8S_NODE} --init-node ${K8S_NODE} \
     ${anp_enabled_flag} \
@@ -2150,6 +2163,7 @@ ovnkube-controller-with-node() {
     ${ssl_opts} \
     ${network_qos_enabled_flag} \
     ${ovn_enable_dnsnameresolver_flag} \
+    ${ovn_disable_requestedchassis_flag} \
     --cluster-subnets ${net_cidr} --k8s-service-cidr=${svc_cidr} \
     --export-ovs-metrics \
     --gateway-mode=${ovn_gateway_mode} ${ovn_gateway_opts} \
