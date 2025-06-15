@@ -97,6 +97,12 @@ const (
 	// OVNNodeHostCIDRs is used to track the different host IP addresses and subnet masks on the node
 	OVNNodeHostCIDRs = "k8s.ovn.org/host-cidrs"
 
+	// OVNNodeDPUHostCIDRs is used to track the different DPU host IP addresses and subnet masks on the node
+	OVNNodeDPUHostCIDRs = "k8s.ovn.org/dpu-host-cidrs"
+
+	// OVNNodePrimaryDPUAddr is used to track the primary DPU address on the node
+	OVNNodePrimaryDPUAddr = "k8s.ovn.org/primary-dpu-addr"
+
 	// OVNNodeSecondaryHostEgressIPs contains EgressIP addresses that aren't managed by OVN. The EIP addresses are assigned to
 	// standard linux interfaces and not interfaces of type OVS.
 	OVNNodeSecondaryHostEgressIPs = "k8s.ovn.org/secondary-host-egress-ips"
@@ -1121,6 +1127,85 @@ func ParseNodeHostCIDRsList(node *corev1.Node) ([]string, error) {
 	return parseNodeAnnotationList(node, OVNNodeHostCIDRs)
 }
 
+func SetNodeDPUHostCIDRs(nodeAnnotator kube.Annotator, cidrs sets.Set[string]) error {
+	return nodeAnnotator.Set(OVNNodeDPUHostCIDRs, sets.List(cidrs))
+}
+
+func NodeDPUHostCIDRsAnnotationChanged(oldNode, newNode *corev1.Node) bool {
+	return oldNode.Annotations[OVNNodeDPUHostCIDRs] != newNode.Annotations[OVNNodeDPUHostCIDRs]
+}
+
+// ParseNodeDPUHostCIDRs returns the parsed DPU host CIDRS living on a node
+func ParseNodeDPUHostCIDRs(node *corev1.Node) (sets.Set[string], error) {
+	addrAnnotation, ok := node.Annotations[OVNNodeDPUHostCIDRs]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodeDPUHostCIDRs, node.Name)
+	}
+
+	var cfg []string
+	if err := json.Unmarshal([]byte(addrAnnotation), &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal DPU host cidrs annotation %s for node %q: %v",
+			addrAnnotation, node.Name, err)
+	}
+
+	return sets.New(cfg...), nil
+}
+
+// ParseNodeDPUHostCIDRsDropNetMask returns the parsed DPU host IP addresses found on a node's DPU host CIDR annotation. Removes the mask.
+func ParseNodeDPUHostCIDRsDropNetMask(node *corev1.Node) (sets.Set[string], error) {
+	addrAnnotation, ok := node.Annotations[OVNNodeDPUHostCIDRs]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodeDPUHostCIDRs, node.Name)
+	}
+
+	var cfg []string
+	if err := json.Unmarshal([]byte(addrAnnotation), &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal DPU host cidrs annotation %s for node %q: %v",
+			addrAnnotation, node.Name, err)
+	}
+
+	for i, cidr := range cfg {
+		ip, _, err := net.ParseCIDR(cidr)
+		if err != nil || ip == nil {
+			return nil, fmt.Errorf("failed to parse node DPU host cidr: %v", err)
+		}
+		cfg[i] = ip.String()
+	}
+	return sets.New(cfg...), nil
+}
+
+// GetNodeDPUHostAddrs returns the parsed DPU Host CIDR annotation of the given node
+// as an array of strings. If the annotation is not set, then we return empty list.
+func GetNodeDPUHostAddrs(node *corev1.Node) ([]string, error) {
+	hostAddresses, err := ParseNodeDPUHostCIDRsDropNetMask(node)
+	if err != nil && !IsAnnotationNotSetError(err) {
+		return nil, fmt.Errorf("failed to get node DPU host CIDRs for %s: %s", node.Name, err.Error())
+	}
+	return sets.List(hostAddresses), nil
+}
+
+// GetNodeDPUHostAddrsAsIPs returns the parsed DPU Host CIDR annotation of the given node
+// as an array of net.IP. If the annotation is not set, then we return empty list.
+func GetNodeDPUHostAddrsAsIPs(node *corev1.Node) ([]net.IP, error) {
+	dpuHostAddresses, err := GetNodeDPUHostAddrs(node)
+	if err != nil {
+		return nil, err
+	}
+
+	dpuHostAddressesIPs := make([]net.IP, 0, len(dpuHostAddresses))
+	for _, ipStr := range dpuHostAddresses {
+		ip := net.ParseIP(ipStr)
+		if ip != nil {
+			dpuHostAddressesIPs = append(dpuHostAddressesIPs, ip)
+		}
+	}
+	return dpuHostAddressesIPs, nil
+}
+
+func ParseNodeDPUHostCIDRsList(node *corev1.Node) ([]string, error) {
+	return parseNodeAnnotationList(node, OVNNodeDPUHostCIDRs)
+}
+
 func ParseNodeDontSNATSubnetsList(node *corev1.Node) ([]string, error) {
 	return parseNodeAnnotationList(node, OvnNodeDontSNATSubnets)
 }
@@ -1533,4 +1618,74 @@ func ParseNodeEncapIPsAnnotation(node *corev1.Node) ([]string, error) {
 
 func NodeEncapIPsChanged(oldNode, newNode *corev1.Node) bool {
 	return oldNode.Annotations[OVNNodeEncapIPs] != newNode.Annotations[OVNNodeEncapIPs]
+}
+
+// SetNodePrimaryDPUAddr sets the primary DPU address annotation on a node
+func SetNodePrimaryDPUAddr(nodeAnnotator kube.Annotator, ifAddrs []*net.IPNet) error {
+	nodeIPNetv4, _ := MatchFirstIPNetFamily(false, ifAddrs)
+	nodeIPNetv6, _ := MatchFirstIPNetFamily(true, ifAddrs)
+
+	ifAddrAnnotation := ifAddr{}
+	if nodeIPNetv4 != nil {
+		ifAddrAnnotation.IPv4 = nodeIPNetv4.String()
+	}
+	if nodeIPNetv6 != nil {
+		ifAddrAnnotation.IPv6 = nodeIPNetv6.String()
+	}
+	return nodeAnnotator.Set(OVNNodePrimaryDPUAddr, ifAddrAnnotation)
+}
+
+// NodePrimaryDPUAddrAnnotationChanged returns true if the primary DPU address annotation changed
+func NodePrimaryDPUAddrAnnotationChanged(oldNode, newNode *corev1.Node) bool {
+	return oldNode.Annotations[OVNNodePrimaryDPUAddr] != newNode.Annotations[OVNNodePrimaryDPUAddr]
+}
+
+// GetNodePrimaryDPUAddrAnnotation returns the raw primary DPU address annotation from a node
+func GetNodePrimaryDPUAddrAnnotation(node *corev1.Node) (*ifAddr, error) {
+	addrAnnotation, ok := node.Annotations[OVNNodePrimaryDPUAddr]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodePrimaryDPUAddr, node.Name)
+	}
+	nodeIfAddr := &ifAddr{}
+	if err := json.Unmarshal([]byte(addrAnnotation), nodeIfAddr); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal annotation: %s for node %q, err: %v", OvnNodeIfAddr, node.Name, err)
+	}
+	if nodeIfAddr.IPv4 == "" && nodeIfAddr.IPv6 == "" {
+		return nil, fmt.Errorf("node: %q does not have any IP information set", node.Name)
+	}
+	return nodeIfAddr, nil
+}
+
+// ParseNodePrimaryDPUAddr returns the parsed primary DPU address as an IPNet
+func ParseNodePrimaryDPUAddr(node *corev1.Node) (*net.IPNet, error) {
+	addrAnnotation, ok := node.Annotations[OVNNodePrimaryDPUAddr]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodePrimaryDPUAddr, node.Name)
+	}
+
+	_, ipNet, err := net.ParseCIDR(addrAnnotation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse primary DPU address %s for node %q: %v", addrAnnotation, node.Name, err)
+	}
+	return ipNet, nil
+}
+
+// ParseNodePrimaryDPUAddrAsIP returns the parsed primary DPU address as an IP
+func ParseNodePrimaryDPUAddrAsIP(node *corev1.Node) (net.IP, error) {
+	addrAnnotation, ok := node.Annotations[OVNNodePrimaryDPUAddr]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodePrimaryDPUAddr, node.Name)
+	}
+
+	ip, _, err := net.ParseCIDR(addrAnnotation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse primary DPU address %s for node %q: %v", addrAnnotation, node.Name, err)
+	}
+	return ip, nil
+}
+
+// IsNodePrimaryDPUAddrAnnotationSet returns true if the primary DPU address annotation is set
+func IsNodePrimaryDPUAddrAnnotationSet(node *corev1.Node) bool {
+	_, ok := node.Annotations[OVNNodePrimaryDPUAddr]
+	return ok
 }

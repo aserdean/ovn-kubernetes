@@ -965,7 +965,7 @@ func (nc *DefaultNodeNetworkController) Init(ctx context.Context) error {
 	// First part of gateway initialization. It will be completed by (nc *DefaultNodeNetworkController) Start()
 	if config.OvnKubeNode.Mode != types.NodeModeDPUHost {
 		// Initialize gateway for OVS internal port or representor management port
-		gw, err := nc.initGatewayPreStart(subnets, nodeAnnotator, nc.mgmtPortController, nodeAddr)
+		gw, err := nc.initGatewayPreStart(subnets, nodeAnnotator, nc.mgmtPortController)
 		if err != nil {
 			return err
 		}
@@ -1058,7 +1058,7 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 			netdevName = netdevs[0]
 			config.Gateway.Interface = netdevName
 		}
-		err = nc.initGatewayDPUHost(nc.nodeAddress)
+		err = nc.initGatewayDPUHost(nc.nodeAddress, nodeAnnotator)
 		if err != nil {
 			return err
 		}
