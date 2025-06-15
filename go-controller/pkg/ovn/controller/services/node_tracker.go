@@ -43,6 +43,8 @@ type nodeInfo struct {
 	l3gatewayAddresses []net.IP
 	// The list of physical IPs and subnet masks the node has, as reported by the host-cidrs annotation
 	hostAddresses []net.IP
+	// The list of DPU host IP addresses and subnet masks the node has, as reported by the dpu-host-cidrs annotation
+	dpuHostAddresses []net.IP
 	// The pod network subnet(s)
 	podSubnets []net.IPNet
 	// the name of the node's GatewayRouter, or "" of non-existent
@@ -73,6 +75,14 @@ func (ni *nodeInfo) hostAddressesStr() []string {
 func (ni *nodeInfo) l3gatewayAddressesStr() []string {
 	out := make([]string, 0, len(ni.l3gatewayAddresses))
 	for _, ip := range ni.l3gatewayAddresses {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+func (ni *nodeInfo) dpuHostAddressesStr() []string {
+	out := make([]string, 0, len(ni.dpuHostAddresses))
+	for _, ip := range ni.dpuHostAddresses {
 		out = append(out, ip.String())
 	}
 	return out
@@ -116,6 +126,7 @@ func (nt *nodeTracker) Start(nodeInformer coreinformers.NodeInformer) (cache.Res
 			// - L3Gateway annotation's ip addresses have changed
 			// - the name of the node (very rare) has changed
 			// - the `host-cidrs` annotation changed
+			// - the `dpu-host-cidrs` annotation changed
 			// - node changes its zone
 			// - node becomes a hybrid overlay node from a ovn node or vice verse
 			// . No need to trigger update for any other field change.
@@ -123,6 +134,7 @@ func (nt *nodeTracker) Start(nodeInformer coreinformers.NodeInformer) (cache.Res
 				util.NodeL3GatewayAnnotationChanged(oldObj, newObj) ||
 				oldObj.Name != newObj.Name ||
 				util.NodeHostCIDRsAnnotationChanged(oldObj, newObj) ||
+				util.NodeDPUHostCIDRsAnnotationChanged(oldObj, newObj) ||
 				util.NodeZoneAnnotationChanged(oldObj, newObj) ||
 				util.NodeMigratedZoneAnnotationChanged(oldObj, newObj) ||
 				util.NoHostSubnet(oldObj) != util.NoHostSubnet(newObj) {
@@ -152,11 +164,12 @@ func (nt *nodeTracker) Start(nodeInformer coreinformers.NodeInformer) (cache.Res
 // updateNodeInfo updates the node info cache, and syncs all services
 // if it changed.
 func (nt *nodeTracker) updateNodeInfo(nodeName, switchName, routerName, chassisID string, l3gatewayAddresses,
-	hostAddresses []net.IP, podSubnets []*net.IPNet, zone string, nodePortDisabled, migrated bool) {
+	hostAddresses, dpuHostAddresses []net.IP, podSubnets []*net.IPNet, zone string, nodePortDisabled, migrated bool) {
 	ni := nodeInfo{
 		name:               nodeName,
 		l3gatewayAddresses: l3gatewayAddresses,
 		hostAddresses:      hostAddresses,
+		dpuHostAddresses:   dpuHostAddresses,
 		podSubnets:         make([]net.IPNet, 0, len(podSubnets)),
 		gatewayRouterName:  routerName,
 		switchName:         switchName,
@@ -256,6 +269,11 @@ func (nt *nodeTracker) updateNode(node *corev1.Node) {
 		hostAddressesIPs = append(hostAddressesIPs, ip)
 	}
 
+	dpuHostAddresses, err := util.GetNodeDPUHostAddrsAsIPs(node)
+	if err != nil {
+		klog.Warningf("Failed to get node DPU host CIDRs for [%s]: %s", node.Name, err.Error())
+	}
+
 	nt.updateNodeInfo(
 		node.Name,
 		switchName,
@@ -263,6 +281,7 @@ func (nt *nodeTracker) updateNode(node *corev1.Node) {
 		chassisID,
 		l3gatewayAddresses,
 		hostAddressesIPs,
+		dpuHostAddresses,
 		hsn,
 		util.GetNodeZone(node),
 		!nodePortEnabled,
