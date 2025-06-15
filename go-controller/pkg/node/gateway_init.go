@@ -9,6 +9,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
@@ -326,7 +328,6 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 	subnets []*net.IPNet,
 	nodeAnnotator kube.Annotator,
 	mgmtPort managementport.Interface,
-	kubeNodeIP net.IP,
 ) (*gateway, error) {
 
 	klog.Info("Initializing Gateway Functionality for Gateway PreStart")
@@ -353,10 +354,20 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 	// For DPU need to use the host IP addr which currently is assumed to be K8s Node cluster
 	// internal IP address.
 	if config.OvnKubeNode.Mode == types.NodeModeDPU {
-		ifAddrs, err = getDPUHostPrimaryIPAddresses(kubeNodeIP, ifAddrs)
+		var node *corev1.Node
+		if node, err = nc.watchFactory.GetNode(nc.name); err != nil {
+			return nil, fmt.Errorf("error retrieving node %s: %v", nc.name, err)
+		}
+		nodeAddrStr, err := util.GetNodePrimaryDPUAddrAnnotation(node)
 		if err != nil {
 			return nil, err
 		}
+		_, nodeAddr, err := net.ParseCIDR(nodeAddrStr.IPv4)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse node IP address. %v", nodeAddrStr)
+		}
+
+		ifAddrs = append(ifAddrs, nodeAddr)
 	}
 
 	if err := util.SetNodePrimaryIfAddrs(nodeAnnotator, ifAddrs); err != nil {
@@ -490,43 +501,89 @@ func interfaceForEXGW(intfName string) string {
 	return intfName
 }
 
-func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP) error {
+func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP, nodeAnnotator kube.Annotator) error {
 	// A DPU host gateway is complementary to the shared gateway running
 	// on the DPU embedded CPU. it performs some initializations and
 	// watch on services for iptable rule updates and run a loadBalancerHealth checker
 	// Note: all K8s Node related annotations are handled from DPU.
 	klog.Info("Initializing Shared Gateway Functionality on DPU host")
 	var err error
+	var gatewayIntf string
+	configuredIntf := config.Gateway.Interface
 
-	// Force gateway interface to be the interface associated with kubeNodeIP
-	gwIntf, err := getInterfaceByIP(kubeNodeIP)
-	if err != nil {
-		return err
-	}
-	config.Gateway.Interface = gwIntf
-
-	_, gatewayIntf, err := getGatewayNextHops()
+	// Step 1: Detect the network interface that has the Kubernetes node IP
+	kubeIntf, err := getInterfaceByIP(kubeNodeIP)
 	if err != nil {
 		return err
 	}
 
+	// Step 2: Determine which interface to use for gateway operations
+	// Priority: configured interface > auto-detected interface
+	if configuredIntf != "" {
+		// Use the explicitly configured gateway interface
+		config.Gateway.Interface = configuredIntf
+		gatewayIntf = configuredIntf
+	} else {
+		// Fall back to the auto-detected interface
+		config.Gateway.Interface = kubeIntf
+		gatewayIntf = kubeIntf
+	}
+
+	// Step 3: Validate gateway configuration and get next-hop information
+	_, gatewayIntf, err = getGatewayNextHops()
+	if err != nil {
+		return err
+	}
+
+	// Step 4: Get IP addresses for the selected gateway interface
 	ifAddrs, err := getNetworkInterfaceIPAddresses(gatewayIntf)
 	if err != nil {
 		return err
 	}
 
+	// Step 5: Build the set of node addresses for annotations
+	nodeIPNetv4, _ := util.MatchFirstIPNetFamily(false, ifAddrs)
+	nodeAddrSet := sets.New[string](nodeIPNetv4.String())
+
+	// Step 6: If we're using a configured interface different from the detected one,
+	// include both interfaces in the address set for complete network visibility
+	if configuredIntf != "" && configuredIntf != kubeIntf {
+		detectedIfAddrs, err := getNetworkInterfaceIPAddresses(kubeIntf)
+		if err != nil {
+			return err
+		}
+		detectedIPNetv4, _ := util.MatchFirstIPNetFamily(false, detectedIfAddrs)
+		nodeAddrSet.Insert(detectedIPNetv4.String())
+		// use the configured interface for the masquerade route
+		kubeIntf = configuredIntf
+	}
+
+	if err := util.SetNodePrimaryDPUAddr(nodeAnnotator, ifAddrs); err != nil {
+		klog.Errorf("Unable to set primary IP net label on node, err: %v", err)
+		return err
+	}
+
+	if err := util.SetNodeDPUHostCIDRs(nodeAnnotator, nodeAddrSet); err != nil {
+		klog.Errorf("Unable to set host-cidrs on node, err: %v", err)
+		return err
+	}
+
+	if err := nodeAnnotator.Run(); err != nil {
+		return fmt.Errorf("failed to set node %s annotations: %w", nc.name, err)
+	}
+
 	// Delete stale masquerade resources if there are any. This is to make sure that there
 	// are no Linux resources with IP from old masquerade subnet when masquerade subnet
 	// gets changed as part of day2 operation.
-	if err := deleteStaleMasqueradeResources(gwIntf, nc.name, nc.watchFactory); err != nil {
+	if err := deleteStaleMasqueradeResources(kubeIntf, nc.name, nc.watchFactory); err != nil {
 		return fmt.Errorf("failed to remove stale masquerade resources: %w", err)
 	}
 
-	if err := setNodeMasqueradeIPOnExtBridge(gwIntf); err != nil {
-		return fmt.Errorf("failed to set the node masquerade IP on the ext bridge %s: %v", gwIntf, err)
+	if err := setNodeMasqueradeIPOnExtBridge(kubeIntf); err != nil {
+		return fmt.Errorf("failed to set the node masquerade IP on the ext bridge %s: %v", kubeIntf, err)
 	}
 
-	if err := addMasqueradeRoute(nc.routeManager, gwIntf, nc.name, ifAddrs, nc.watchFactory); err != nil {
+	if err := addMasqueradeRoute(nc.routeManager, kubeIntf, nc.name, ifAddrs, nc.watchFactory); err != nil {
 		return fmt.Errorf("failed to set the node masquerade route to OVN: %v", err)
 	}
 
@@ -561,7 +618,7 @@ func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP) er
 		gw.portClaimWatcher = portClaimWatcher
 	}
 
-	if err := addHostMACBindings(gwIntf); err != nil {
+	if err := addHostMACBindings(kubeIntf); err != nil {
 		return fmt.Errorf("failed to add MAC bindings for service routing")
 	}
 
