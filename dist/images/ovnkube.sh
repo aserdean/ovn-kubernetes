@@ -339,12 +339,10 @@ ovn_disable_requestedchassis=${OVN_DISABLE_REQUESTEDCHASSIS:-false}
 # external_ids:host-k8s-nodename is set on an Open_vSwitch enabled system if the ovnkube pod
 # should function on behalf of a different host than external_ids:host
 # overwrite the K8S_NODE env var with the one found within the OVS metadata in this case
-if [[ ${ovnkube_node_mode} == "dpu" ]]; then
-  K8S_NODE=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:host-k8s-nodename | tr -d '\"')
-  if [[ ${K8S_NODE} == "" ]]; then
-    echo "Trying to run in DPU mode and couldn't get the required Host K8s Nodename. Exiting..."
-    exit 1
-  fi
+ovn_k8s_node=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:host-k8s-nodename | tr -d '\"')
+if [[ ${K8S_NODE} != "" ]]; then
+  echo "host-k8s-nodename set overriding K8S_NODE"
+  K8S_NODE=$ovn_k8s_node
 fi
 
 # Determine the ovn rundir.
