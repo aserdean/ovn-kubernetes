@@ -1029,7 +1029,12 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 	// Complete gateway initialization
 	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
 		if config.Gateway.Interface == "from-pci-address" {
-			pciAddr, err := util.GetSriovnetOps().GetPciFromNetDevice(config.OvnKubeNode.MgmtPortNetdev)
+			netdevName, err := getManagementPortNetDev(config.OvnKubeNode.MgmtPortNetdev)
+			if err != nil {
+				return err
+			}
+
+			pciAddr, err := util.GetSriovnetOps().GetPciFromNetDevice(netdevName)
 			if err != nil {
 				return err
 			}
@@ -1044,7 +1049,7 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 			if len(netdevs) == 0 {
 				return fmt.Errorf("no netdevs found for pci address %s", pfPciAddr)
 			}
-			netdevName := netdevs[0]
+			netdevName = netdevs[0]
 			config.Gateway.Interface = netdevName
 		}
 		err = nc.initGatewayDPUHost(nc.nodeAddress, nodeAnnotator)
