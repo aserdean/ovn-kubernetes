@@ -340,7 +340,7 @@ ovn_disable_requestedchassis=${OVN_DISABLE_REQUESTEDCHASSIS:-false}
 # should function on behalf of a different host than external_ids:host
 # overwrite the K8S_NODE env var with the one found within the OVS metadata in this case
 ovn_k8s_node=$(ovs-vsctl --if-exists get Open_vSwitch . external_ids:host-k8s-nodename | tr -d '\"')
-if [[ ${K8S_NODE} != "" ]]; then
+if [[ ! -z $ovn_k8s_node ]]; then
   echo "host-k8s-nodename set overriding K8S_NODE"
   K8S_NODE=$ovn_k8s_node
 fi
