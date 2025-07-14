@@ -1028,7 +1028,14 @@ func (nc *DefaultNodeNetworkController) Start(ctx context.Context) error {
 
 	// Complete gateway initialization
 	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
-		if config.Gateway.Interface == "from-pci-address" {
+		// Resolve gateway interface from PCI address when configured as "from-pci-address"
+		// This performs the following steps:
+		// Get the management port network device name
+		// Retrieve the PCI address of the management port device
+		// Get the Physical Function (PF) PCI address from the Virtual Function (VF) PCI address
+		// Retrieve all network devices associated with the PF PCI address
+		// Select the first available network device as the gateway interface
+		if config.Gateway.Interface == types.FromPCIAddress {
 			netdevName, err := getManagementPortNetDev(config.OvnKubeNode.MgmtPortNetdev)
 			if err != nil {
 				return err
