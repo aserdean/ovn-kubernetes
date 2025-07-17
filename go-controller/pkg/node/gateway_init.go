@@ -362,12 +362,13 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 		if err != nil {
 			return nil, err
 		}
-		_, nodeAddr, err := net.ParseCIDR(nodeAddrStr.IPv4)
+		nodeIP, nodeAddrs, err := net.ParseCIDR(nodeAddrStr.IPv4)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse node IP address. %v", nodeAddrStr)
 		}
-
-		ifAddrs = append(ifAddrs, nodeAddr)
+		nodeAddrs.IP = nodeIP
+		var gwIps []*net.IPNet
+		ifAddrs = append(gwIps, nodeAddrs)
 	}
 
 	if err := util.SetNodePrimaryIfAddrs(nodeAnnotator, ifAddrs); err != nil {
