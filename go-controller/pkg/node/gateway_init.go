@@ -508,54 +508,33 @@ func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP, no
 	// Note: all K8s Node related annotations are handled from DPU.
 	klog.Info("Initializing Shared Gateway Functionality on DPU host")
 	var err error
-	var gatewayIntf string
-	configuredIntf := config.Gateway.Interface
 
-	// Step 1: Detect the network interface that has the Kubernetes node IP
 	kubeIntf, err := getInterfaceByIP(kubeNodeIP)
 	if err != nil {
 		return err
 	}
 
-	// Step 2: Determine which interface to use for gateway operations
-	// Priority: configured interface > auto-detected interface
-	if configuredIntf != "" {
-		// Use the explicitly configured gateway interface
-		config.Gateway.Interface = configuredIntf
-		gatewayIntf = configuredIntf
-	} else {
-		// Fall back to the auto-detected interface
-		config.Gateway.Interface = kubeIntf
-		gatewayIntf = kubeIntf
-	}
-
-	// Step 3: Validate gateway configuration and get next-hop information
-	_, gatewayIntf, err = getGatewayNextHops()
+	ifAddrs, err := getNetworkInterfaceIPAddresses(kubeIntf)
 	if err != nil {
 		return err
 	}
 
-	// Step 4: Get IP addresses for the selected gateway interface
-	ifAddrs, err := getNetworkInterfaceIPAddresses(gatewayIntf)
-	if err != nil {
-		return err
-	}
-
-	// Step 5: Build the set of node addresses for annotations
 	nodeIPNetv4, _ := util.MatchFirstIPNetFamily(false, ifAddrs)
 	nodeAddrSet := sets.New[string](nodeIPNetv4.String())
 
-	// Step 6: If we're using a configured interface different from the detected one,
-	// include both interfaces in the address set for complete network visibility
-	if configuredIntf != "" && configuredIntf != kubeIntf {
-		detectedIfAddrs, err := getNetworkInterfaceIPAddresses(kubeIntf)
+	if config.Gateway.Interface == "" {
+		config.Gateway.Interface = kubeIntf
+	}
+
+	if config.Gateway.Interface != kubeIntf {
+		ifAddrs, err = getNetworkInterfaceIPAddresses(config.Gateway.Interface)
 		if err != nil {
 			return err
 		}
-		detectedIPNetv4, _ := util.MatchFirstIPNetFamily(false, detectedIfAddrs)
+		detectedIPNetv4, _ := util.MatchFirstIPNetFamily(false, ifAddrs)
 		nodeAddrSet.Insert(detectedIPNetv4.String())
 		// use the configured interface for the masquerade route
-		kubeIntf = configuredIntf
+		kubeIntf = config.Gateway.Interface
 	}
 
 	if err := util.SetNodePrimaryDPUAddr(nodeAnnotator, ifAddrs); err != nil {
@@ -592,7 +571,7 @@ func (nc *DefaultNodeNetworkController) initGatewayDPUHost(kubeNodeIP net.IP, no
 		return fmt.Errorf("failed to update masquerade subnet annotation on node: %s, error: %v", nc.name, err)
 	}
 
-	err = configureSvcRouteViaInterface(nc.routeManager, gatewayIntf, DummyNextHopIPs())
+	err = configureSvcRouteViaInterface(nc.routeManager, config.Gateway.Interface, DummyNextHopIPs())
 	if err != nil {
 		return err
 	}
