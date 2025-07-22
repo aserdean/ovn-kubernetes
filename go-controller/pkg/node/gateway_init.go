@@ -188,6 +188,50 @@ func configureSvcRouteViaInterface(routeManager *routemanager.Controller, iface 
 	return nil
 }
 
+// getInterfaceAddressesForNodeMode returns the appropriate interface addresses based on the node mode
+func getInterfaceAddressesForNodeMode(nc *DefaultNodeNetworkController, gatewayIntf string) ([]*net.IPNet, error) {
+	switch config.OvnKubeNode.Mode {
+	case types.NodeModeDPU:
+		// For DPU mode, use the host IP address which is assumed to be the K8s Node cluster
+		// internal IP address
+		// Retrieve the current node object from the Kubernetes API
+		var node *corev1.Node
+		var err error
+		if node, err = nc.watchFactory.GetNode(nc.name); err != nil {
+			return nil, fmt.Errorf("error retrieving node %s: %v", nc.name, err)
+		}
+
+		// Extract the primary DPU address annotation from the node
+		nodeIfAddr, err := util.GetNodePrimaryDPUHostAddrAnnotation(node)
+		if err != nil {
+			return nil, err
+		}
+		// For DPU mode, we only support IPv4 for now.
+		nodeAddrStr := nodeIfAddr.IPv4
+		if nodeAddrStr == "" {
+			return nil, fmt.Errorf("node primary DPU address annotation is empty for node %s", nc.name)
+		}
+
+		// Parse the IPv4 address string into IP and network components
+		nodeIP, nodeAddrs, err := net.ParseCIDR(nodeAddrStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse node IP address %s: %v", nodeAddrStr, err)
+		}
+
+		// Set the parsed IP as the network address
+		nodeAddrs.IP = nodeIP
+
+		// Create a new slice and replace ifAddrs with the DPU host address
+		// This overrides the gateway interface addresses for DPU mode
+		var gwIps []*net.IPNet
+		ifAddrs := append(gwIps, nodeAddrs)
+		return ifAddrs, nil
+	default:
+		// For other modes, get network interface IP addresses directly
+		return nodeutil.GetNetworkInterfaceIPAddresses(gatewayIntf)
+	}
+}
+
 // initGatewayPreStart executes the first part of the gateway initialization for the node.
 // It creates the gateway object, the node IP manager, openflow manager and node port watcher
 // once OVN controller is ready and the patch port exists for this node.
@@ -215,7 +259,8 @@ func (nc *DefaultNodeNetworkController) initGatewayPreStart(
 		egressGWInterface = interfaceForEXGW(config.Gateway.EgressGWInterface)
 	}
 
-	ifAddrs, err = nodeutil.GetNetworkInterfaceIPAddresses(gatewayIntf)
+	// Get interface addresses based on node mode
+	ifAddrs, err = getInterfaceAddressesForNodeMode(nc, gatewayIntf)
 	if err != nil {
 		return nil, err
 	}
