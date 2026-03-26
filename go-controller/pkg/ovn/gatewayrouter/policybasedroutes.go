@@ -32,6 +32,151 @@ func NewPolicyBasedRoutesManager(nbClient client.Client, clusterRouterName strin
 	}
 }
 
+// AddCrossNodeHostIPPolicy creates PBR rules on the cluster router that reroute
+// cross-node pod→host traffic to the destination node's management port.
+// Unlike AddSameNodeIPPolicy, these rules do NOT have an inport restriction,
+// so they match traffic from any node's pods destined to this node's host IPs.
+// They use InterNodePolicyPriority (1003), one below NodeSubnetPolicyPriority (1004),
+// so same-node rules (with inport match) take precedence when applicable.
+func (pbr *PolicyBasedRoutesManager) AddCrossNodeHostIPPolicy(nodeName, mgmtPortIP string, hostIfCIDR *net.IPNet, otherHostAddrs []string) error {
+	if hostIfCIDR == nil {
+		return fmt.Errorf("<nil> host interface CIDR")
+	}
+	if mgmtPortIP == "" || net.ParseIP(mgmtPortIP) == nil {
+		return fmt.Errorf("invalid management port IP address: %q", mgmtPortIP)
+	}
+	if len(hostIfCIDR.IP) == 0 {
+		return fmt.Errorf("invalid host address: %v", hostIfCIDR.String())
+	}
+	if !isHostIPsValid(otherHostAddrs) {
+		return fmt.Errorf("invalid other host address(es): %v", otherHostAddrs)
+	}
+	l3Prefix := getIPCIDRPrefix(hostIfCIDR)
+	matches := sets.New[string]()
+	for _, hostIP := range append(otherHostAddrs, hostIfCIDR.IP.String()) {
+		matchStr := generateCrossNodeIPMatch(l3Prefix, hostIP, nodeName)
+		matches = matches.Insert(matchStr)
+	}
+
+	if err := pbr.sync(
+		nodeName,
+		matches,
+		ovntypes.InterNodePolicyPriority,
+		mgmtPortIP,
+	); err != nil {
+		return fmt.Errorf("unable to sync cross-node host IP policies, err: %v", err)
+	}
+
+	return nil
+}
+
+// AddCrossNodeHostIPRoutes creates static routes on the cluster router for the
+// node's host IPs pointing to the management port. These are required because
+// OVN evaluates routing BEFORE policy — without a matching route, the packet is
+// dropped before the PBR at InterNodePolicyPriority can reroute it.
+func (pbr *PolicyBasedRoutesManager) AddCrossNodeHostIPRoutes(nodeName, mgmtPortIP string, hostIfCIDR *net.IPNet, otherHostAddrs []string) error {
+	if hostIfCIDR == nil || mgmtPortIP == "" {
+		return nil
+	}
+	for _, hostIP := range append(otherHostAddrs, hostIfCIDR.IP.String()) {
+		parsedIP := net.ParseIP(hostIP)
+		if parsedIP == nil {
+			continue
+		}
+		if utilnet.IsIPv6(parsedIP) != utilnet.IsIPv6(net.ParseIP(mgmtPortIP)) {
+			continue
+		}
+		prefix := parsedIP.String() + util.GetIPFullMaskString(parsedIP.String())
+		lrsr := nbdb.LogicalRouterStaticRoute{
+			ExternalIDs: map[string]string{
+				"ic-node":                  nodeName,
+				"ic-host-ip":               "true",
+				ovntypes.NetworkExternalID: pbr.netInfo.GetNetworkName(),
+			},
+			Nexthop:  mgmtPortIP,
+			IPPrefix: prefix,
+		}
+		p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+			return item.IPPrefix == prefix &&
+				item.ExternalIDs["ic-node"] == nodeName &&
+				item.ExternalIDs["ic-host-ip"] == "true"
+		}
+		if err := libovsdbops.CreateOrReplaceLogicalRouterStaticRouteWithPredicate(
+			pbr.nbClient, pbr.clusterRouterName, &lrsr, p, &lrsr.Nexthop,
+		); err != nil {
+			return fmt.Errorf("failed to add cluster router host IP route %s → %s: %w", prefix, mgmtPortIP, err)
+		}
+	}
+	return nil
+}
+
+// AddRemoteZoneNodeHostIPPolicy creates PBR rules on the local zone's cluster router
+// for a remote zone node's host IPs. In IC mode, the nexthop must be the transit switch
+// IP for the remote zone (directly connected), not the remote mp0 IP (unreachable).
+// Traffic matching these rules traverses the transit switch to the remote zone, where
+// a corresponding AddCrossNodeHostIPPolicy rule delivers it to the remote node's mp0.
+func (pbr *PolicyBasedRoutesManager) AddRemoteZoneNodeHostIPPolicy(nodeName string, hostIPs []string, transitNexthops []*net.IPNet) error {
+	if !isHostIPsValid(hostIPs) {
+		return fmt.Errorf("invalid host address(es): %v", hostIPs)
+	}
+	if len(transitNexthops) == 0 {
+		return fmt.Errorf("no transit switch nexthops provided for node %s", nodeName)
+	}
+
+	nexthopByFamily := map[bool]string{}
+	for _, nh := range transitNexthops {
+		nexthopByFamily[utilnet.IsIPv6(nh.IP)] = nh.IP.String()
+	}
+
+	// sync() takes a single nexthop, so group matches by IP family
+	for _, isV6 := range []bool{false, true} {
+		nexthop, ok := nexthopByFamily[isV6]
+		if !ok {
+			continue
+		}
+		familyMatches := sets.New[string]()
+		l3Prefix := "ip4"
+		if isV6 {
+			l3Prefix = "ip6"
+		}
+		for _, hostIP := range hostIPs {
+			parsedIP := net.ParseIP(hostIP)
+			if parsedIP == nil {
+				continue
+			}
+			if utilnet.IsIPv6(parsedIP) != isV6 {
+				continue
+			}
+			familyMatches.Insert(generateCrossNodeIPMatch(l3Prefix, hostIP, nodeName))
+		}
+		if familyMatches.Len() == 0 {
+			continue
+		}
+		if err := pbr.sync(nodeName, familyMatches, ovntypes.InterNodePolicyPriority, nexthop); err != nil {
+			return fmt.Errorf("unable to sync remote zone host IP policies for node %s, err: %v", nodeName, err)
+		}
+	}
+	return nil
+}
+
+// DeleteRemoteZoneNodeHostIPPolicy removes all InterNodePolicyPriority PBR rules
+// for a given remote node from the cluster router. Used during remote node cleanup.
+func (pbr *PolicyBasedRoutesManager) DeleteRemoteZoneNodeHostIPPolicy(nodeName string) error {
+	policies, err := pbr.findPolicyBasedRoutes(ovntypes.InterNodePolicyPriority)
+	if err != nil {
+		return fmt.Errorf("unable to list policies for cleanup, err: %v", err)
+	}
+	for _, policy := range policies {
+		if strings.Contains(policy.Match, fmt.Sprintf(`"%s"`, nodeName)) {
+			if err := pbr.deletePolicyBasedRoutes(policy.UUID); err != nil {
+				return fmt.Errorf("failed to delete remote zone host IP policy '%s' for node %q: %v",
+					policy.UUID, nodeName, err)
+			}
+		}
+	}
+	return nil
+}
+
 func (pbr *PolicyBasedRoutesManager) AddSameNodeIPPolicy(nodeName, mgmtPortIP string, hostIfCIDR *net.IPNet, otherHostAddrs []string) error {
 	if hostIfCIDR == nil {
 		return fmt.Errorf("<nil> host interface CIDR")
@@ -142,7 +287,7 @@ func (pbr *PolicyBasedRoutesManager) sync(nodeName string, matches sets.Set[stri
 	// create a map to track matches found
 	matchTracker := sets.New(sets.List(matches)...)
 
-	if priority == ovntypes.NodeSubnetPolicyPriority {
+	if priority == ovntypes.NodeSubnetPolicyPriority || priority == ovntypes.InterNodePolicyPriority {
 		policies, err := pbr.findPolicyBasedRoutes(priority)
 		if err != nil {
 			return fmt.Errorf("unable to list policies, err: %v", err)
@@ -261,6 +406,10 @@ func (pbr *PolicyBasedRoutesManager) createPolicyBasedRoutes(match, priority, ne
 
 func generateNodeIPMatch(switchName, ipPrefix, hostIP string) string {
 	return fmt.Sprintf(`inport == "%s%s" && %s.dst == %s /* %s */`, ovntypes.RouterToSwitchPrefix, switchName, ipPrefix, hostIP, switchName)
+}
+
+func generateCrossNodeIPMatch(ipPrefix, hostIP, nodeName string) string {
+	return fmt.Sprintf(`%s.dst == %s /* "%s" */`, ipPrefix, hostIP, nodeName)
 }
 
 func generateHostCIDRMatch(ipPrefix, nodePrimaryCIDRPrefix, clusterPodSubnetPrefix string) string {
