@@ -1522,7 +1522,7 @@ func (gw *GatewayManager) policyRouteCleanup(nextHops []net.IP) {
 // remove Logical Router Policy on ovn_cluster_router for a specific node.
 // Specify priorities to only delete specific types
 func (gw *GatewayManager) removeLRPolicies(nodeName string) {
-	priorities := []string{types.NodeSubnetPolicyPriority}
+	priorities := []string{types.NodeSubnetPolicyPriority, types.InterNodePolicyPriority, types.RemoteZoneInterNodePolicyPriority}
 
 	intPriorities := sets.Set[int]{}
 	for _, priority := range priorities {
@@ -1539,7 +1539,9 @@ func (gw *GatewayManager) removeLRPolicies(nodeName string) {
 		if networkName != managedNetworkName {
 			return false
 		}
-		return strings.Contains(item.Match, fmt.Sprintf("%s ", nodeName)) && intPriorities.Has(item.Priority)
+		nameMatch := strings.Contains(item.Match, fmt.Sprintf(`/* %s */`, gw.netInfo.GetNetworkScopedSwitchName(nodeName))) ||
+			strings.Contains(item.Match, fmt.Sprintf(`"%s"`, nodeName))
+		return nameMatch && intPriorities.Has(item.Priority)
 	}
 	err := libovsdbops.DeleteLogicalRouterPoliciesWithPredicate(gw.nbClient, gw.clusterRouterName, p)
 	if err != nil && !errors.Is(err, libovsdbclient.ErrNotFound) {
@@ -1589,6 +1591,7 @@ func (gw *GatewayManager) SyncGateway(
 	if gw.clusterRouterName == "" {
 		routerName = gw.gwRouterName
 	}
+	anyFamilyMultiHomed := false
 	for _, subnet := range gwConfig.hostSubnets {
 		mgmtIfAddr := gw.netInfo.GetNodeManagementIP(subnet)
 		if mgmtIfAddr == nil {
@@ -1606,11 +1609,42 @@ func (gw *GatewayManager) SyncGateway(
 		if err := pbrMngr.AddSameNodeIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
 			return fmt.Errorf("failed to configure the policy based routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
 		}
+		// Cross-node host-IP routing is needed so that pod→host traffic arriving
+		// at the receiving zone's cluster router via the transit switch has both a
+		// /32 static route and an inport-qualified PBR to deliver the packet to
+		// that node's mp0.
+		// Skip only for L2 networks without a transit router: there the cluster
+		// router is not the IC entry point and adding /32 static routes would
+		// black-hole traffic that must reach the node via the physical uplink.
+		// For L3 topology, transitRouterInfo is nil (set only for L2) but the
+		// transit switch port (rtots-) still exists on the cluster router in IC
+		// mode, so we use TopologyType != Layer2 as the condition.
+		if len(relevantHostIPs) >= 1 && (gw.transitRouterInfo != nil || gw.netInfo.TopologyType() != types.Layer2Topology) {
+			anyFamilyMultiHomed = true
+			transitPort := gw.netInfo.GetNetworkScopedName(types.RouterToTransitSwitchPrefix + node.Name)
+			if err := pbrMngr.AddCrossNodeHostIPPolicy(transitPort, node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
+				return fmt.Errorf("failed to configure cross-node host IP policy routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
+			}
+			if err := pbrMngr.AddCrossNodeHostIPRoutes(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
+				return fmt.Errorf("failed to configure cross-node host IP routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
+			}
+		}
 		if gw.netInfo.TopologyType() == types.Layer2Topology && gw.transitRouterInfo == nil && config.Gateway.Mode == config.GatewayModeLocal {
 			if err := pbrMngr.AddHostCIDRPolicy(node, mgmtIfAddr.IP.String(), subnet.String()); err != nil {
 				return fmt.Errorf("failed to configure the hostCIDR policy for L2 network %q on local gateway: %v",
 					gw.netInfo.GetNetworkName(), err)
 			}
+		}
+	}
+
+	// Clean up cross-node host-IP resources once (outside the per-family loop)
+	// when no IP family qualified as multi-homed. This handles nodes that lost
+	// a floating VIP and are now single-homed in all families.
+	if !anyFamilyMultiHomed {
+		pbrMngr := gatewayrouter.NewPolicyBasedRoutesManager(gw.nbClient, routerName, gw.netInfo)
+		if err := pbrMngr.DeleteCrossNodeHostIPResources(node.Name); err != nil {
+			klog.Warningf("Failed to clean up cross-node host IP resources for node %s on network %q: %v",
+				node.Name, gw.netInfo.GetNetworkName(), err)
 		}
 	}
 
