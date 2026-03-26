@@ -16,10 +16,12 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/udn"
 	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	gatewayrouter "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/gatewayrouter"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
@@ -130,6 +132,8 @@ type ZoneInterconnectHandler struct {
 	networkClusterRouterName string
 	// transit switch name for the network
 	networkTransitSwitchName string
+	// localNodeName is the name of the local zone node, set when AddLocalZoneNode is called
+	localNodeName string
 }
 
 // NewZoneInterconnectHandler returns a new ZoneInterconnectHandler object
@@ -201,6 +205,7 @@ func (zic *ZoneInterconnectHandler) ensureTransitSwitch() error {
 // See createLocalZoneNodeResources() below for more details.
 func (zic *ZoneInterconnectHandler) AddLocalZoneNode(node *corev1.Node) error {
 	klog.Infof("Creating interconnect resources for local zone node %s for the network %s", node.Name, zic.GetNetworkName())
+	zic.localNodeName = node.Name
 	nodeID, _ := util.GetNodeID(node)
 	if nodeID == -1 {
 		// Don't consider this node as cluster-manager has not allocated node id yet.
@@ -553,6 +558,10 @@ func (zic *ZoneInterconnectHandler) createRemoteZoneNodeResources(node *corev1.N
 		return err
 	}
 
+	if err := zic.addRemoteNodeHostIPPolicies(node, nodeTransitSwitchPortIPs); err != nil {
+		return err
+	}
+
 	// Cleanup the logical router port connecting to the transit switch for the remote node (if present)
 	// Cleanup would be required when a local zone node moves to a remote zone.
 	return zic.cleanupNodeClusterRouterPort(node.Name)
@@ -600,6 +609,10 @@ func (zic *ZoneInterconnectHandler) cleanupNode(nodeName string) error {
 	}
 	if err := libovsdbops.DeleteLogicalRouterStaticRoutesWithPredicate(zic.nbClient, zic.networkClusterRouterName, p); err != nil {
 		return fmt.Errorf("failed to cleanup static routes for the node %s: %w", nodeName, err)
+	}
+
+	if err := zic.deleteRemoteNodeHostIPPolicies(nodeName); err != nil {
+		return fmt.Errorf("failed to cleanup host IP policies for the node %s: %w", nodeName, err)
 	}
 
 	return nil
@@ -793,6 +806,218 @@ func (zic *ZoneInterconnectHandler) getStaticRoutes(ipPrefixes []*net.IPNet, nex
 	}
 
 	return staticRoutes
+}
+
+// addRemoteNodeHostIPPolicies creates PBR rules and cluster router static
+// routes so that pod-to-host cross-zone traffic works.
+// Only applies in shared gateway mode.
+func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPPolicies(node *corev1.Node, nodeTransitSwitchPortIPs []*net.IPNet) error {
+	if config.Gateway.Mode != config.GatewayModeShared {
+		return nil
+	}
+	if !util.NodeIsMultiHomed(node) {
+		return nil
+	}
+
+	hostAddrs, err := util.GetNodeHostAddrs(node)
+	if err != nil {
+		if util.IsAnnotationNotSetError(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get host CIDRs for remote node %s: %w", node.Name, err)
+	}
+	if len(hostAddrs) == 0 {
+		return nil
+	}
+
+	// PBR rules on the cluster router for pod→host cross-zone traffic
+	pbrMngr := gatewayrouter.NewPolicyBasedRoutesManager(zic.nbClient, zic.networkClusterRouterName, zic.NetInfo)
+	if err := pbrMngr.AddRemoteZoneNodeHostIPPolicy(node.Name, hostAddrs, nodeTransitSwitchPortIPs); err != nil {
+		return err
+	}
+
+	// Cluster router static routes for remote host IPs → transit nexthop.
+	if err := zic.addRemoteNodeHostIPStaticRoutes(node, hostAddrs, nodeTransitSwitchPortIPs); err != nil {
+		return err
+	}
+
+	if err := zic.addLocalGRHostServiceRouting(node, hostAddrs); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// addRemoteNodeHostIPStaticRoutes adds dst-ip static routes on the cluster router
+// for each remote host IP pointing to the transit switch nexthop.
+func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPStaticRoutes(node *corev1.Node, hostAddrs []string, transitNexthops []*net.IPNet) error {
+	for _, hostAddr := range hostAddrs {
+		hostIP := net.ParseIP(hostAddr)
+		if hostIP == nil {
+			continue
+		}
+		for _, transitNH := range transitNexthops {
+			if utilnet.IsIPv6(hostIP) != utilnet.IsIPv6(transitNH.IP) {
+				continue
+			}
+			prefix := hostIP.String() + util.GetIPFullMaskString(hostIP.String())
+			lrsr := nbdb.LogicalRouterStaticRoute{
+				ExternalIDs: map[string]string{
+					"ic-node":               node.Name,
+					"ic-host-ip":            "true",
+					types.NetworkExternalID: zic.GetNetworkName(),
+				},
+				Nexthop:  transitNH.IP.String(),
+				IPPrefix: prefix,
+			}
+			p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+				return item.IPPrefix == prefix &&
+					item.ExternalIDs["ic-node"] == node.Name &&
+					item.ExternalIDs["ic-host-ip"] == "true"
+			}
+			if err := libovsdbops.CreateOrReplaceLogicalRouterStaticRouteWithPredicate(
+				zic.nbClient, zic.networkClusterRouterName, &lrsr, p, &lrsr.Nexthop,
+			); err != nil {
+				return fmt.Errorf("failed to add cluster router host IP route %s → %s: %w", prefix, transitNH.IP, err)
+			}
+		}
+	}
+	return nil
+}
+
+// addLocalGRHostServiceRouting adds static routes and SNAT rules on the local
+// zone's GR so that host-originated traffic to remote zone host IPs is routed
+// through the cluster router (join switch) instead of the physical network.
+func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.Node, remoteHostAddrs []string) error {
+	if zic.localNodeName == "" {
+		return nil
+	}
+	localNode, err := zic.watchFactory.GetNode(zic.localNodeName)
+	if err != nil {
+		klog.Warningf("Failed to get local node %s for GR host service routing: %v", zic.localNodeName, err)
+		return nil
+	}
+
+	localGRName := zic.GetNetworkScopedGWRouterName(zic.localNodeName)
+
+	crJoinPortName := types.GWRouterToJoinSwitchPrefix + zic.networkClusterRouterName
+	lrp := &nbdb.LogicalRouterPort{Name: crJoinPortName}
+	lrp, err = libovsdbops.GetLogicalRouterPort(zic.nbClient, lrp)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster router join port %s: %w", crJoinPortName, err)
+	}
+	if len(lrp.Networks) == 0 {
+		return fmt.Errorf("cluster router join port %s has no networks", crJoinPortName)
+	}
+
+	joinIPs := map[bool]string{}
+	for _, network := range lrp.Networks {
+		ip, _, err := net.ParseCIDR(network)
+		if err != nil {
+			continue
+		}
+		joinIPs[utilnet.IsIPv6(ip)] = ip.String()
+	}
+
+	l3GwConfig, err := util.ParseNodeL3GatewayAnnotation(localNode)
+	if err != nil {
+		return fmt.Errorf("failed to parse l3 gateway config for node %s: %w", zic.localNodeName, err)
+	}
+
+	externalIPs := map[bool]net.IP{}
+	for _, ipNet := range l3GwConfig.IPAddresses {
+		externalIPs[utilnet.IsIPv6(ipNet.IP)] = ipNet.IP
+	}
+
+	for _, hostAddr := range remoteHostAddrs {
+		hostIP := net.ParseIP(hostAddr)
+		if hostIP == nil {
+			continue
+		}
+		isV6 := utilnet.IsIPv6(hostIP)
+		joinIP, ok := joinIPs[isV6]
+		if !ok {
+			continue
+		}
+		prefix := hostIP.String() + util.GetIPFullMaskString(hostIP.String())
+		lrsr := nbdb.LogicalRouterStaticRoute{
+			ExternalIDs: map[string]string{
+				"ic-node":               node.Name,
+				"ic-host-ip":            "true",
+				types.NetworkExternalID: zic.GetNetworkName(),
+			},
+			Nexthop:  joinIP,
+			IPPrefix: prefix,
+		}
+		p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+			return item.IPPrefix == prefix &&
+				item.ExternalIDs["ic-node"] == node.Name &&
+				item.ExternalIDs["ic-host-ip"] == "true"
+		}
+		if err := libovsdbops.CreateOrReplaceLogicalRouterStaticRouteWithPredicate(
+			zic.nbClient, localGRName, &lrsr, p, &lrsr.Nexthop,
+		); err != nil {
+			return fmt.Errorf("failed to add GR host IP route %s → %s on %s: %w", prefix, joinIP, localGRName, err)
+		}
+	}
+
+	for _, isV6 := range []bool{false, true} {
+		extIP, ok := externalIPs[isV6]
+		if !ok {
+			continue
+		}
+		var masqIP net.IP
+		if isV6 {
+			masqIP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
+		} else {
+			masqIP = config.Gateway.MasqueradeIPs.V4HostMasqueradeIP
+		}
+		if masqIP == nil {
+			continue
+		}
+		masqCIDR := &net.IPNet{IP: masqIP, Mask: util.GetIPFullMask(masqIP)}
+		nat := libovsdbops.BuildSNAT(&extIP, masqCIDR, "", map[string]string{"ic-masq-snat": "true"})
+		gr := &nbdb.LogicalRouter{Name: localGRName}
+		if err := libovsdbops.CreateOrUpdateNATs(zic.nbClient, gr, nat); err != nil {
+			return fmt.Errorf("failed to add masquerade SNAT on %s: %w", localGRName, err)
+		}
+	}
+
+	return nil
+}
+
+// deleteRemoteNodeHostIPPolicies removes PBR rules, static routes, and
+// GR routes for a remote node's host IPs.
+func (zic *ZoneInterconnectHandler) deleteRemoteNodeHostIPPolicies(nodeName string) error {
+	// Only multi-homed nodes have cross-node PBR/route resources. If the node
+	// is still accessible and is single-homed, skip the cleanup entirely.
+	if node, err := zic.watchFactory.GetNode(nodeName); err == nil && !util.NodeIsMultiHomed(node) {
+		return nil
+	}
+
+	// Delete PBR rules
+	pbrMngr := gatewayrouter.NewPolicyBasedRoutesManager(zic.nbClient, zic.networkClusterRouterName, zic.NetInfo)
+	if err := pbrMngr.DeleteRemoteZoneNodeHostIPPolicy(nodeName); err != nil {
+		return err
+	}
+
+	// Delete cluster router static routes with ic-host-ip marker
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.ExternalIDs["ic-node"] == nodeName &&
+			item.ExternalIDs["ic-host-ip"] == "true"
+	}
+	if err := libovsdbops.DeleteLogicalRouterStaticRoutesWithPredicate(zic.nbClient, zic.networkClusterRouterName, p); err != nil {
+		return fmt.Errorf("failed to delete cluster router host IP routes for node %s: %w", nodeName, err)
+	}
+
+	if zic.localNodeName != "" {
+		localGRName := zic.GetNetworkScopedGWRouterName(zic.localNodeName)
+		if err := libovsdbops.DeleteLogicalRouterStaticRoutesWithPredicate(zic.nbClient, localGRName, p); err != nil {
+			return fmt.Errorf("failed to delete GR host IP routes for node %s on %s: %w", nodeName, localGRName, err)
+		}
+	}
+
+	return nil
 }
 
 func getUserDefinedNetTransitSwitchExtIDs(networkName, topology string, isPrimaryUDN bool) map[string]string {

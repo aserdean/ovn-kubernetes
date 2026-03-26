@@ -76,11 +76,11 @@ type BridgeConfiguration struct {
 	interfaceID string
 
 	// variables that can be updated (read/write access should be done with mutex held)
-	ofPortHost string
-	ips        []*net.IPNet
-	macAddress net.HardwareAddr
-	ofPortPhys string
-	netConfig  map[string]*BridgeUDNConfiguration
+	ofPortHost      string
+	ips             []*net.IPNet
+	macAddress      net.HardwareAddr
+	ofPortPhys      string
+	netConfig       map[string]*BridgeUDNConfiguration
 	eipMarkIPs *egressip.MarkIPsCache
 	dropGARP   bool
 }

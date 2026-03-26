@@ -1514,7 +1514,7 @@ func (gw *GatewayManager) policyRouteCleanup(nextHops []net.IP) {
 // remove Logical Router Policy on ovn_cluster_router for a specific node.
 // Specify priorities to only delete specific types
 func (gw *GatewayManager) removeLRPolicies(nodeName string) {
-	priorities := []string{types.NodeSubnetPolicyPriority}
+	priorities := []string{types.NodeSubnetPolicyPriority, types.InterNodePolicyPriority}
 
 	intPriorities := sets.Set[int]{}
 	for _, priority := range priorities {
@@ -1531,7 +1531,9 @@ func (gw *GatewayManager) removeLRPolicies(nodeName string) {
 		if networkName != managedNetworkName {
 			return false
 		}
-		return strings.Contains(item.Match, fmt.Sprintf("%s ", nodeName)) && intPriorities.Has(item.Priority)
+		nameMatch := strings.Contains(item.Match, fmt.Sprintf("%s ", nodeName)) ||
+			strings.Contains(item.Match, fmt.Sprintf(`%s"`, nodeName))
+		return nameMatch && intPriorities.Has(item.Priority)
 	}
 	err := libovsdbops.DeleteLogicalRouterPoliciesWithPredicate(gw.nbClient, gw.clusterRouterName, p)
 	if err != nil && !errors.Is(err, libovsdbclient.ErrNotFound) {
@@ -1597,6 +1599,14 @@ func (gw *GatewayManager) SyncGateway(
 		pbrMngr := gatewayrouter.NewPolicyBasedRoutesManager(gw.nbClient, routerName, gw.netInfo)
 		if err := pbrMngr.AddSameNodeIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
 			return fmt.Errorf("failed to configure the policy based routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
+		}
+		if util.NodeIsMultiHomed(node) {
+			if err := pbrMngr.AddCrossNodeHostIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
+				return fmt.Errorf("failed to configure cross-node host IP policy routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
+			}
+			if err := pbrMngr.AddCrossNodeHostIPRoutes(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
+				return fmt.Errorf("failed to configure cross-node host IP routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
+			}
 		}
 		if gw.netInfo.TopologyType() == types.Layer2Topology && gw.transitRouterInfo == nil && config.Gateway.Mode == config.GatewayModeLocal {
 			if err := pbrMngr.AddHostCIDRPolicy(node, mgmtIfAddr.IP.String(), subnet.String()); err != nil {
