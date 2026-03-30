@@ -1608,7 +1608,11 @@ func (gw *GatewayManager) SyncGateway(
 		if err := pbrMngr.AddSameNodeIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
 			return fmt.Errorf("failed to configure the policy based routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
 		}
-		if util.NodeIsMultiHomed(node) {
+		// Cross-node host-IP routing is only meaningful in IC mode where a transit
+		// switch connects zones. Without a transit router the traffic must flow via
+		// the physical uplink; adding /32 cluster-router static routes here would
+		// black-hole traffic to masters on plain L2 networks connected via a router.
+		if util.NodeIsMultiHomed(node) && gw.transitRouterInfo != nil {
 			if err := pbrMngr.AddCrossNodeHostIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
 				return fmt.Errorf("failed to configure cross-node host IP policy routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
 			}
