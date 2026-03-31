@@ -890,19 +890,13 @@ func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPStaticRoutes(node *corev1
 // through the cluster router (join switch) instead of the physical network.
 func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.Node, remoteHostAddrs []string) error {
 	if zic.localNodeName == "" {
-		return nil
+		return fmt.Errorf("local node not yet known, cannot configure GR host service routing for remote node %s", node.Name)
 	}
-	localNode, err := zic.watchFactory.GetNode(zic.localNodeName)
-	if err != nil {
-		klog.Warningf("Failed to get local node %s for GR host service routing: %v", zic.localNodeName, err)
-		return nil
-	}
-
 	localGRName := zic.GetNetworkScopedGWRouterName(zic.localNodeName)
 
 	crJoinPortName := types.GWRouterToJoinSwitchPrefix + zic.networkClusterRouterName
 	lrp := &nbdb.LogicalRouterPort{Name: crJoinPortName}
-	lrp, err = libovsdbops.GetLogicalRouterPort(zic.nbClient, lrp)
+	lrp, err := libovsdbops.GetLogicalRouterPort(zic.nbClient, lrp)
 	if err != nil {
 		return fmt.Errorf("failed to get cluster router join port %s: %w", crJoinPortName, err)
 	}
@@ -917,16 +911,6 @@ func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.No
 			continue
 		}
 		joinIPs[utilnet.IsIPv6(ip)] = ip.String()
-	}
-
-	l3GwConfig, err := util.ParseNodeL3GatewayAnnotation(localNode)
-	if err != nil {
-		return fmt.Errorf("failed to parse l3 gateway config for node %s: %w", zic.localNodeName, err)
-	}
-
-	externalIPs := map[bool]net.IP{}
-	for _, ipNet := range l3GwConfig.IPAddresses {
-		externalIPs[utilnet.IsIPv6(ipNet.IP)] = ipNet.IP
 	}
 
 	for _, hostAddr := range remoteHostAddrs {
@@ -958,28 +942,6 @@ func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.No
 			zic.nbClient, localGRName, &lrsr, p, &lrsr.Nexthop,
 		); err != nil {
 			return fmt.Errorf("failed to add GR host IP route %s → %s on %s: %w", prefix, joinIP, localGRName, err)
-		}
-	}
-
-	for _, isV6 := range []bool{false, true} {
-		extIP, ok := externalIPs[isV6]
-		if !ok {
-			continue
-		}
-		var masqIP net.IP
-		if isV6 {
-			masqIP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
-		} else {
-			masqIP = config.Gateway.MasqueradeIPs.V4HostMasqueradeIP
-		}
-		if masqIP == nil {
-			continue
-		}
-		masqCIDR := &net.IPNet{IP: masqIP, Mask: util.GetIPFullMask(masqIP)}
-		nat := libovsdbops.BuildSNAT(&extIP, masqCIDR, "", map[string]string{"ic-masq-snat": "true"})
-		gr := &nbdb.LogicalRouter{Name: localGRName}
-		if err := libovsdbops.CreateOrUpdateNATs(zic.nbClient, gr, nat); err != nil {
-			return fmt.Errorf("failed to add masquerade SNAT on %s: %w", localGRName, err)
 		}
 	}
 
