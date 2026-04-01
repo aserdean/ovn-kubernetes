@@ -890,7 +890,11 @@ func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPStaticRoutes(node *corev1
 // through the cluster router (join switch) instead of the physical network.
 func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.Node, remoteHostAddrs []string) error {
 	if zic.localNodeName == "" {
-		return fmt.Errorf("local node not yet known, cannot configure GR host service routing for remote node %s", node.Name)
+		// Local node has not called AddLocalZoneNode yet; GR routes for host traffic
+		// will be installed on the next reconcile. The IC pod→host PBR/route resources
+		// are installed independently, so silently skip rather than failing the whole
+		// remote node setup.
+		return nil
 	}
 	localGRName := zic.GetNetworkScopedGWRouterName(zic.localNodeName)
 
