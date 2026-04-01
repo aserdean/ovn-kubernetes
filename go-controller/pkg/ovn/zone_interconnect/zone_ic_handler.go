@@ -885,22 +885,35 @@ func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPStaticRoutes(node *corev1
 	return nil
 }
 
-// addLocalGRHostServiceRouting adds static routes and SNAT rules on the local
-// zone's GR so that host-originated traffic to remote zone host IPs is routed
-// through the cluster router (join switch) instead of the physical network.
+// addLocalGRHostServiceRouting adds static routes and a masquerade SNAT on the
+// local zone's GR so that host-originated traffic to remote zone host IPs is
+// steered through the cluster router (join switch → IC transit switch) and the
+// return traffic reaches the local node via the physical uplink.
+//
+// Without the masquerade SNAT, the traffic leaving the GR carries the
+// V4HostMasqueradeIP (169.254.0.2) as its source.  Because every node uses the
+// same masquerade IP, the remote node would try to reply to its own local
+// masquerade handler instead of routing back through the IC fabric, breaking
+// the connection.  The SNAT rewrites the source to the local node's physical
+// external IP so that replies travel back via the regular physical network.
 func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.Node, remoteHostAddrs []string) error {
 	if zic.localNodeName == "" {
-		// Local node has not called AddLocalZoneNode yet; GR routes for host traffic
-		// will be installed on the next reconcile. The IC pod→host PBR/route resources
-		// are installed independently, so silently skip rather than failing the whole
-		// remote node setup.
+		// Local node has not called AddLocalZoneNode yet; GR routes will be
+		// installed on the next reconcile.  The IC pod→host PBR/route resources
+		// are installed independently, so silently skip here.
 		return nil
 	}
 	localGRName := zic.GetNetworkScopedGWRouterName(zic.localNodeName)
 
+	localNode, err := zic.watchFactory.GetNode(zic.localNodeName)
+	if err != nil {
+		klog.Warningf("Failed to get local node %s for GR host service routing: %v", zic.localNodeName, err)
+		return nil
+	}
+
 	crJoinPortName := types.GWRouterToJoinSwitchPrefix + zic.networkClusterRouterName
 	lrp := &nbdb.LogicalRouterPort{Name: crJoinPortName}
-	lrp, err := libovsdbops.GetLogicalRouterPort(zic.nbClient, lrp)
+	lrp, err = libovsdbops.GetLogicalRouterPort(zic.nbClient, lrp)
 	if err != nil {
 		return fmt.Errorf("failed to get cluster router join port %s: %w", crJoinPortName, err)
 	}
@@ -949,6 +962,43 @@ func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.No
 		}
 	}
 
+	// Add a masquerade SNAT on the local GR so that the host masquerade IP is
+	// rewritten to the node's physical external IP before the packet transits the
+	// IC fabric.  This lets the remote node route the reply back to the local
+	// node's real IP via the physical network rather than trying to deliver it to
+	// its own masquerade handler (which shares the same 169.254.0.x IP).
+	l3GwConfig, err := util.ParseNodeL3GatewayAnnotation(localNode)
+	if err != nil {
+		return fmt.Errorf("failed to parse l3 gateway config for node %s: %w", zic.localNodeName, err)
+	}
+
+	externalIPs := map[bool]net.IP{}
+	for _, ipNet := range l3GwConfig.IPAddresses {
+		externalIPs[utilnet.IsIPv6(ipNet.IP)] = ipNet.IP
+	}
+
+	for _, isV6 := range []bool{false, true} {
+		extIP, ok := externalIPs[isV6]
+		if !ok {
+			continue
+		}
+		var masqIP net.IP
+		if isV6 {
+			masqIP = config.Gateway.MasqueradeIPs.V6HostMasqueradeIP
+		} else {
+			masqIP = config.Gateway.MasqueradeIPs.V4HostMasqueradeIP
+		}
+		if masqIP == nil {
+			continue
+		}
+		masqCIDR := &net.IPNet{IP: masqIP, Mask: util.GetIPFullMask(masqIP)}
+		nat := libovsdbops.BuildSNAT(&extIP, masqCIDR, "", map[string]string{"ic-masq-snat": "true"})
+		gr := &nbdb.LogicalRouter{Name: localGRName}
+		if err := libovsdbops.CreateOrUpdateNATs(zic.nbClient, gr, nat); err != nil {
+			return fmt.Errorf("failed to add masquerade SNAT on %s: %w", localGRName, err)
+		}
+	}
+
 	return nil
 }
 
@@ -981,9 +1031,56 @@ func (zic *ZoneInterconnectHandler) deleteRemoteNodeHostIPPolicies(nodeName stri
 		if err := libovsdbops.DeleteLogicalRouterStaticRoutesWithPredicate(zic.nbClient, localGRName, p); err != nil {
 			return fmt.Errorf("failed to delete GR host IP routes for node %s on %s: %w", nodeName, localGRName, err)
 		}
+
+		// Remove the masquerade SNAT from the local GR when no other remote
+		// multi-homed nodes remain.  The SNAT is shared across all remote nodes
+		// so it must stay as long as any remote multi-homed node exists.
+		if zic.noRemainingRemoteMultiHomedNodes(nodeName) {
+			if err := zic.deleteLocalGRMasqueradeSNAT(localGRName); err != nil {
+				return fmt.Errorf("failed to delete masquerade SNAT on %s: %w", localGRName, err)
+			}
+		}
 	}
 
 	return nil
+}
+
+// noRemainingRemoteMultiHomedNodes returns true when nodeName is the only
+// remote multi-homed node known to the watch factory — i.e. after this node is
+// cleaned up there will be no more nodes that required the masquerade SNAT.
+func (zic *ZoneInterconnectHandler) noRemainingRemoteMultiHomedNodes(excludeNodeName string) bool {
+	nodes, err := zic.watchFactory.GetNodes()
+	if err != nil {
+		return false
+	}
+	for _, n := range nodes {
+		if n.Name == excludeNodeName || n.Name == zic.localNodeName {
+			continue
+		}
+		if util.NodeIsMultiHomed(n) {
+			return false
+		}
+	}
+	return true
+}
+
+// deleteLocalGRMasqueradeSNAT removes all ic-masq-snat NAT entries from the GR.
+func (zic *ZoneInterconnectHandler) deleteLocalGRMasqueradeSNAT(localGRName string) error {
+	gr := &nbdb.LogicalRouter{Name: localGRName}
+	allNATs, err := libovsdbops.GetRouterNATs(zic.nbClient, gr)
+	if err != nil {
+		return fmt.Errorf("failed to list NATs on %s: %w", localGRName, err)
+	}
+	var toDelete []*nbdb.NAT
+	for _, nat := range allNATs {
+		if nat.ExternalIDs != nil && nat.ExternalIDs["ic-masq-snat"] == "true" {
+			toDelete = append(toDelete, nat)
+		}
+	}
+	if len(toDelete) == 0 {
+		return nil
+	}
+	return libovsdbops.DeleteNATs(zic.nbClient, gr, toDelete...)
 }
 
 func getUserDefinedNetTransitSwitchExtIDs(networkName, topology string, isPrimaryUDN bool) map[string]string {
