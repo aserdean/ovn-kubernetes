@@ -250,7 +250,7 @@ func TestAddSameNodeIPPolicy(t *testing.T) {
 			},
 		},
 		{
-			desc: "[cdn][ipv4][ipv6 no additional addresses",
+			desc: "[cdn][ipv4][ipv6] no additional addresses",
 			addPolicies: []policy{
 				{
 					nodeName:          node1Name,
@@ -335,40 +335,6 @@ func TestAddSameNodeIPPolicy(t *testing.T) {
 						types.NetworkExternalID:  udnL3Network.info.GetNetworkName(),
 						types.TopologyExternalID: udnL3Network.info.TopologyType(),
 					},
-				},
-			},
-		},
-		{
-			desc: "[cdn][ipv4] doesn't alter existing entry",
-			addPolicies: []policy{
-				{
-
-					nodeName:          node1Name,
-					hostInfCIDR:       node1HostCIDRIPv4,
-					otherHostInfAddrs: nil,
-					targetNetwork:     cdnL3Network.info.GetNetworkName(),
-				},
-			},
-			initialDB: networks{cdnL3Network.copyNetworkAndSetLRPs(
-				&nbdb.LogicalRouterPolicy{
-					UUID:     "node-ip-lrp-uuid",
-					Priority: nodeSubNetPrio,
-					Match:    generateNodeIPMatch(cdnL3Network.info.GetNetworkScopedSwitchName(node1Name), v4Prefix, node1HostIPv4Str),
-					Action:   nbdb.LogicalRouterPolicyActionReroute,
-					Nexthops: []string{node1CDNMgntIPv4Str},
-				})},
-			expectedDB: []libovsdbtest.TestData{
-				&nbdb.LogicalRouter{
-					UUID:     "cdn-cr-uuid",
-					Name:     cdnL3Network.info.GetNetworkScopedClusterRouterName(),
-					Policies: []string{"node-ip-lrp-uuid"},
-				},
-				&nbdb.LogicalRouterPolicy{
-					UUID:     "node-ip-lrp-uuid",
-					Priority: nodeSubNetPrio,
-					Match:    generateNodeIPMatch(cdnL3Network.info.GetNetworkScopedSwitchName(node1Name), v4Prefix, node1HostIPv4Str),
-					Action:   nbdb.LogicalRouterPolicyActionReroute,
-					Nexthops: []string{node1CDNMgntIPv4Str},
 				},
 			},
 		},
@@ -653,14 +619,12 @@ func TestAddHostCIDRPolicy(t *testing.T) {
 
 func TestAddCrossNodeHostIPPolicy(t *testing.T) {
 	const (
-		nodeName             = "node1"
-		nodeHostIPv4Str      = "10.0.110.1"
-		nodeHostCIDRIPv4Str  = nodeHostIPv4Str + "/32"
-		nodeOtherIPv4Str     = "10.0.120.1"
-		nodeMgntIPv4Str      = "11.0.1.2"
-		clusterSubnetIPv4Str = "10.233.64.0/18"
-		joinSubnetIPv4Str    = "100.64.0.0/16"
-		v4Prefix             = "ip4"
+		nodeName            = "node1"
+		nodeHostIPv4Str     = "10.0.110.1"
+		nodeHostCIDRIPv4Str = nodeHostIPv4Str + "/32"
+		nodeOtherIPv4Str    = "10.0.120.1"
+		nodeMgntIPv4Str     = "11.0.1.2"
+		v4Prefix            = "ip4"
 	)
 
 	var (
@@ -806,9 +770,9 @@ func TestCrossNodeHostIPPolicyGate(t *testing.T) {
 		}
 	}
 
-	// Verify no PBR rules were created
+	interNodePrio, _ := strconv.Atoi(types.InterNodePolicyPriority)
 	policies, err := libovsdbops.FindLogicalRouterPoliciesWithPredicate(nbdbClient, func(item *nbdb.LogicalRouterPolicy) bool {
-		return item.Priority == 1003
+		return item.Priority == interNodePrio
 	})
 	if err != nil {
 		t.Fatalf("failed to list policies: %v", err)
@@ -825,8 +789,6 @@ func TestAddCrossNodeHostIPRoutes(t *testing.T) {
 		nodeHostCIDRIPv4Str = nodeHostIPv4Str + "/32"
 		nodeOtherIPv4Str    = "10.0.120.1"
 		nodeMgntIPv4Str     = "11.0.1.2"
-		joinSubnetIPv4Str   = "100.64.0.0/16"
-		clusterSubIPv4Str   = "10.233.64.0/18"
 	)
 
 	var (

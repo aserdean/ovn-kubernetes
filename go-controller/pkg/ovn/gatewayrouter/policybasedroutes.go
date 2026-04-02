@@ -296,7 +296,7 @@ func (pbr *PolicyBasedRoutesManager) sync(nodeName string, matches sets.Set[stri
 		// sync and remove unknown policies for this node/priority
 		// also flag if desired policies are already found
 		for _, policy := range policies {
-			if strings.Contains(policy.Match, fmt.Sprintf("%s\"", nodeName)) {
+			if strings.Contains(policy.Match, fmt.Sprintf("\"%s\"", nodeName)) {
 				// if the policy is for this node and has the wrong mgmtPortIP as nexthop, remove it
 				// FIXME we currently assume that foundNexthops is a single ip, this may
 				// change in the future.

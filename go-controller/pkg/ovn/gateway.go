@@ -1539,8 +1539,8 @@ func (gw *GatewayManager) removeLRPolicies(nodeName string) {
 		if networkName != managedNetworkName {
 			return false
 		}
-		nameMatch := strings.Contains(item.Match, fmt.Sprintf("%s ", nodeName)) ||
-			strings.Contains(item.Match, fmt.Sprintf(`%s"`, nodeName))
+		nameMatch := strings.Contains(item.Match, fmt.Sprintf(`/* %s */`, gw.netInfo.GetNetworkScopedSwitchName(nodeName))) ||
+			strings.Contains(item.Match, fmt.Sprintf(`"%s"`, nodeName))
 		return nameMatch && intPriorities.Has(item.Priority)
 	}
 	err := libovsdbops.DeleteLogicalRouterPoliciesWithPredicate(gw.nbClient, gw.clusterRouterName, p)
@@ -1615,7 +1615,7 @@ func (gw *GatewayManager) SyncGateway(
 		// is not the IC entry point and adding /32 static routes would black-hole
 		// traffic that must reach the node via the physical uplink through an external
 		// router.
-		if util.NodeIsMultiHomed(node) && (gw.transitRouterInfo != nil || gw.netInfo.TopologyType() != types.Layer2Topology) {
+		if len(relevantHostIPs) >= 1 && (gw.transitRouterInfo != nil || gw.netInfo.TopologyType() != types.Layer2Topology) {
 			if err := pbrMngr.AddCrossNodeHostIPPolicy(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
 				return fmt.Errorf("failed to configure cross-node host IP policy routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
 			}
