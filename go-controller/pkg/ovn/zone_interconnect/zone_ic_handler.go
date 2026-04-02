@@ -885,22 +885,25 @@ func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPStaticRoutes(node *corev1
 	return nil
 }
 
-// addLocalGRHostServiceRouting adds static routes and a masquerade SNAT on the
-// local zone's GR so that host-originated traffic to remote zone host IPs is
-// steered through the cluster router (join switch → IC transit switch) and the
-// return traffic reaches the local node via the physical uplink.
+// addLocalGRHostServiceRouting adds a masquerade SNAT on the local zone's GR so
+// that host-originated service traffic (which carries the PF masquerade IP as
+// its source) gets rewritten to the node's physical external IP before being
+// forwarded to the LB-selected backend on a remote node.
 //
-// Without the masquerade SNAT, the traffic leaving the GR carries the
-// V4HostMasqueradeIP (169.254.0.2) as its source.  Because every node uses the
-// same masquerade IP, the remote node would try to reply to its own local
-// masquerade handler instead of routing back through the IC fabric, breaking
-// the connection.  The SNAT rewrites the source to the local node's physical
-// external IP so that replies travel back via the regular physical network.
+// Without the SNAT, the packet leaves the GR with the host masquerade IP (e.g.
+// 169.254.0.2) as its source. This address is link-local between the host PF
+// and the DPU, so the remote endpoint cannot route the reply back — breaking
+// the connection.
+//
+// We intentionally do NOT add /32 static routes for remote host IPs on the GR.
+// Such routes would match LB-DNAT'd traffic (whose dst is a remote host IP
+// after DNAT) and force it through the join switch → IC transit path, while
+// replies still come back via the physical network — creating asymmetric routing
+// that breaks conntrack-based unSNAT with hardware-offloaded datapaths.
+// The GR's default route already sends traffic to remote hosts via the physical
+// network, which is the correct symmetric path for service traffic.
 func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.Node, remoteHostAddrs []string) error {
 	if zic.localNodeName == "" {
-		// Local node has not called AddLocalZoneNode yet; GR routes will be
-		// installed on the next reconcile.  The IC pod→host PBR/route resources
-		// are installed independently, so silently skip here.
 		return nil
 	}
 	localGRName := zic.GetNetworkScopedGWRouterName(zic.localNodeName)
@@ -911,62 +914,6 @@ func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.No
 		return nil
 	}
 
-	crJoinPortName := types.GWRouterToJoinSwitchPrefix + zic.networkClusterRouterName
-	lrp := &nbdb.LogicalRouterPort{Name: crJoinPortName}
-	lrp, err = libovsdbops.GetLogicalRouterPort(zic.nbClient, lrp)
-	if err != nil {
-		return fmt.Errorf("failed to get cluster router join port %s: %w", crJoinPortName, err)
-	}
-	if len(lrp.Networks) == 0 {
-		return fmt.Errorf("cluster router join port %s has no networks", crJoinPortName)
-	}
-
-	joinIPs := map[bool]string{}
-	for _, network := range lrp.Networks {
-		ip, _, err := net.ParseCIDR(network)
-		if err != nil {
-			continue
-		}
-		joinIPs[utilnet.IsIPv6(ip)] = ip.String()
-	}
-
-	for _, hostAddr := range remoteHostAddrs {
-		hostIP := net.ParseIP(hostAddr)
-		if hostIP == nil {
-			continue
-		}
-		isV6 := utilnet.IsIPv6(hostIP)
-		joinIP, ok := joinIPs[isV6]
-		if !ok {
-			continue
-		}
-		prefix := hostIP.String() + util.GetIPFullMaskString(hostIP.String())
-		lrsr := nbdb.LogicalRouterStaticRoute{
-			ExternalIDs: map[string]string{
-				"ic-node":               node.Name,
-				"ic-host-ip":            "true",
-				types.NetworkExternalID: zic.GetNetworkName(),
-			},
-			Nexthop:  joinIP,
-			IPPrefix: prefix,
-		}
-		p := func(item *nbdb.LogicalRouterStaticRoute) bool {
-			return item.IPPrefix == prefix &&
-				item.ExternalIDs["ic-node"] == node.Name &&
-				item.ExternalIDs["ic-host-ip"] == "true"
-		}
-		if err := libovsdbops.CreateOrReplaceLogicalRouterStaticRouteWithPredicate(
-			zic.nbClient, localGRName, &lrsr, p, &lrsr.Nexthop,
-		); err != nil {
-			return fmt.Errorf("failed to add GR host IP route %s → %s on %s: %w", prefix, joinIP, localGRName, err)
-		}
-	}
-
-	// Add a masquerade SNAT on the local GR so that the host masquerade IP is
-	// rewritten to the node's physical external IP before the packet transits the
-	// IC fabric.  This lets the remote node route the reply back to the local
-	// node's real IP via the physical network rather than trying to deliver it to
-	// its own masquerade handler (which shares the same 169.254.0.x IP).
 	l3GwConfig, err := util.ParseNodeL3GatewayAnnotation(localNode)
 	if err != nil {
 		return fmt.Errorf("failed to parse l3 gateway config for node %s: %w", zic.localNodeName, err)
