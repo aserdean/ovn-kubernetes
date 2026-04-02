@@ -816,7 +816,9 @@ func (zic *ZoneInterconnectHandler) addRemoteNodeHostIPPolicies(node *corev1.Nod
 		return nil
 	}
 	if !util.NodeIsMultiHomed(node) {
-		return nil
+		// Node may have been multi-homed previously (e.g. a floating VIP moved
+		// away). Clean up any stale PBR/route/SNAT resources left from that state.
+		return zic.deleteRemoteNodeHostIPPolicies(node.Name)
 	}
 
 	hostAddrs, err := util.GetNodeHostAddrs(node)
@@ -950,14 +952,10 @@ func (zic *ZoneInterconnectHandler) addLocalGRHostServiceRouting(node *corev1.No
 }
 
 // deleteRemoteNodeHostIPPolicies removes PBR rules, static routes, and
-// GR routes for a remote node's host IPs.
+// GR routes for a remote node's host IPs. Always attempts cleanup because a
+// node that is currently single-homed may have been multi-homed previously
+// (e.g. a floating VIP moved away), leaving stale resources behind.
 func (zic *ZoneInterconnectHandler) deleteRemoteNodeHostIPPolicies(nodeName string) error {
-	// Only multi-homed nodes have cross-node PBR/route resources. If the node
-	// is still accessible and is single-homed, skip the cleanup entirely.
-	if node, err := zic.watchFactory.GetNode(nodeName); err == nil && !util.NodeIsMultiHomed(node) {
-		return nil
-	}
-
 	// Delete PBR rules
 	pbrMngr := gatewayrouter.NewPolicyBasedRoutesManager(zic.nbClient, zic.networkClusterRouterName, zic.NetInfo)
 	if err := pbrMngr.DeleteRemoteZoneNodeHostIPPolicy(nodeName); err != nil {
