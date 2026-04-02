@@ -1622,6 +1622,11 @@ func (gw *GatewayManager) SyncGateway(
 			if err := pbrMngr.AddCrossNodeHostIPRoutes(node.Name, mgmtIfAddr.IP.String(), l3GatewayConfigIP, relevantHostIPs); err != nil {
 				return fmt.Errorf("failed to configure cross-node host IP routes for network %q: %v", gw.netInfo.GetNetworkName(), err)
 			}
+		} else {
+			if err := pbrMngr.DeleteCrossNodeHostIPResources(node.Name); err != nil {
+				klog.Warningf("Failed to clean up cross-node host IP resources for node %s on network %q: %v",
+					node.Name, gw.netInfo.GetNetworkName(), err)
+			}
 		}
 		if gw.netInfo.TopologyType() == types.Layer2Topology && gw.transitRouterInfo == nil && config.Gateway.Mode == config.GatewayModeLocal {
 			if err := pbrMngr.AddHostCIDRPolicy(node, mgmtIfAddr.IP.String(), subnet.String()); err != nil {

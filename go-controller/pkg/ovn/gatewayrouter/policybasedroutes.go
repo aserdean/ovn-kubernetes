@@ -177,6 +177,23 @@ func (pbr *PolicyBasedRoutesManager) DeleteRemoteZoneNodeHostIPPolicy(nodeName s
 	return nil
 }
 
+// DeleteCrossNodeHostIPResources removes all InterNodePolicyPriority PBR rules
+// and ic-host-ip static routes for a node. Called when a node transitions from
+// multi-homed to single-homed (e.g. floating VIP departs).
+func (pbr *PolicyBasedRoutesManager) DeleteCrossNodeHostIPResources(nodeName string) error {
+	if err := pbr.DeleteRemoteZoneNodeHostIPPolicy(nodeName); err != nil {
+		return err
+	}
+	p := func(item *nbdb.LogicalRouterStaticRoute) bool {
+		return item.ExternalIDs["ic-node"] == nodeName &&
+			item.ExternalIDs["ic-host-ip"] == "true"
+	}
+	if err := libovsdbops.DeleteLogicalRouterStaticRoutesWithPredicate(pbr.nbClient, pbr.clusterRouterName, p); err != nil {
+		return fmt.Errorf("failed to delete cross-node host IP routes for node %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 func (pbr *PolicyBasedRoutesManager) AddSameNodeIPPolicy(nodeName, mgmtPortIP string, hostIfCIDR *net.IPNet, otherHostAddrs []string) error {
 	if hostIfCIDR == nil {
 		return fmt.Errorf("<nil> host interface CIDR")
