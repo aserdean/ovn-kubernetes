@@ -313,7 +313,13 @@ func (pbr *PolicyBasedRoutesManager) sync(nodeName string, matches sets.Set[stri
 		// sync and remove unknown policies for this node/priority
 		// also flag if desired policies are already found
 		for _, policy := range policies {
-			if strings.Contains(policy.Match, fmt.Sprintf("\"%s\"", nodeName)) {
+			// Match the node name followed by a closing quote. This covers both:
+			//   - same-node PBR (priority 1004): inport == "rtos-<nodeName>" embeds nodeName"
+			//   - cross-node PBR (priority 1003): /* "<nodeName>" */ embeds nodeName"
+			// Using a more restrictive pattern (e.g. "<nodeName>") would break same-node
+			// matching because the inport string uses rtos-<nodeName>" where the leading
+			// quote is separated from the node name by the rtos- prefix.
+			if strings.Contains(policy.Match, fmt.Sprintf("%s\"", nodeName)) {
 				// if the policy is for this node and has the wrong mgmtPortIP as nexthop, remove it
 				// FIXME we currently assume that foundNexthops is a single ip, this may
 				// change in the future.
